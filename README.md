@@ -1,4 +1,5 @@
 # HHD Inventory Manager
+<img width="5712" height="4284" alt="IMG_0819 (002)" src="https://github.com/user-attachments/assets/224f445b-869e-43c5-bb43-db2c9d83df6d" />
 
 HHD Inventory Manager is a Windows desktop application for tracking Home Hemodialysis inventory.
 
