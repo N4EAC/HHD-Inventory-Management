@@ -1,0 +1,11 @@
+HHD Inventory Manager 1.0.0 GitHub Package
+
+.gitignore
+HHD_Inventory_Manager_Setup.iss
+HHD_Inventory_Manager_User_Manual.pdf
+README.md
+build_exe.bat
+hhd_inventory_manager.ico
+hhd_inventory_manager.png
+hhd_inventory_manager.py
+run_HHD_Inventory_Manager.bat
