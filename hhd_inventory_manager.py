@@ -22,7 +22,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
 APP_NAME = "HHD Inventory Manager"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.2"
 DB_NAME = "hhd_inventory.db"
 SETTINGS_FILE = "hhd_inventory_settings.json"
 APP_FOLDER_NAME = "HHD Inventory Manager"
@@ -81,7 +81,21 @@ DEFAULT_ITEMS = [
 def app_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
+def user_data_dir():
+    """Writable per-user application data folder.
+
+    Program Files is not writable by normal users, so the live database and
+    settings must live in AppData, not beside the installed EXE.
+    """
+    base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Local")
+    path = os.path.join(base, APP_FOLDER_NAME)
+    os.makedirs(path, exist_ok=True)
+    return path
+
 def db_path():
+    return os.path.join(user_data_dir(), DB_NAME)
+
+def legacy_db_path():
     return os.path.join(app_dir(), DB_NAME)
 
 def icon_path():
@@ -109,7 +123,7 @@ def backup_dir():
     return path
 
 def settings_file_path():
-    return os.path.join(app_dir(), SETTINGS_FILE)
+    return os.path.join(user_data_dir(), SETTINGS_FILE)
 
 def timestamp_for_filename():
     return datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -195,9 +209,20 @@ def parse_date(value, fallback=None):
 
 class InventoryDB:
     def __init__(self):
+        self.migrate_legacy_database_if_needed()
         self.conn = sqlite3.connect(db_path())
         self.conn.row_factory = sqlite3.Row
         self.init_db()
+
+    def migrate_legacy_database_if_needed(self):
+        """Move/copy an older database from the app folder to AppData if needed."""
+        try:
+            new_path = db_path()
+            old_path = legacy_db_path()
+            if os.path.exists(old_path) and not os.path.exists(new_path):
+                shutil.copy2(old_path, new_path)
+        except Exception:
+            pass
 
     def init_db(self):
         c = self.conn.cursor()

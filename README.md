@@ -30,11 +30,7 @@ The program helps a home hemodialysis caregiver or patient maintain a clear, loc
 - Add, rename, edit, and remove inventory items.
 - Record received inventory with date and notes.
 - Log regular, extra, missed, and incomplete dialysis sessions.
-- Calculates current inventory from:
-  - baseline inventory
-  - received inventory
-  - logged sessions
-  - configured usage rules
+- Calculates current inventory from baseline inventory, received inventory, logged sessions, and configured usage rules.
 - Dashboard with current units, estimated weeks remaining, and reorder status.
 - Local SQLite database storage.
 - Automatic database backup every 10 minutes.
@@ -45,13 +41,24 @@ The program helps a home hemodialysis caregiver or patient maintain a clear, loc
 
 ## Data Storage
 
-The live database file is:
+Program files can be installed under:
+
+```text
+C:\Program Files\HHD Inventory Manager
+```
+
+The live writable database and settings are stored per Windows user under:
+
+```text
+C:\Users\<username>\AppData\Local\HHD Inventory Manager
+```
+
+Main user data files:
 
 ```text
 hhd_inventory.db
+hhd_inventory_settings.json
 ```
-
-When running from source, it is stored next to the Python file. When running the built EXE, it is stored next to the executable.
 
 Automatic backup files are stored in:
 
@@ -98,7 +105,7 @@ dist\HHD_Inventory_Manager
 Open the included Inno Setup script:
 
 ```text
-HHD_Inventory_Manager_Setup.iss
+HHD_Inventory_Manager_Setup_ProgramFiles_v1.0.2.iss
 ```
 
 Compile it with Inno Setup to create the Windows installer.
