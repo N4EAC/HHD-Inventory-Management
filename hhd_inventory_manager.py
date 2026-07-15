@@ -22,7 +22,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
 APP_NAME = "HHD Inventory Manager"
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.4"
 DB_NAME = "hhd_inventory.db"
 SETTINGS_FILE = "hhd_inventory_settings.json"
 APP_FOLDER_NAME = "HHD Inventory Manager"
@@ -279,6 +279,8 @@ class InventoryDB:
             "patient_name": "Patient Name",
             "sessions_per_week": "4",
             "first_session_day": "Sunday",
+            "group_nx_display_name": "NxStage Supplies",
+            "group_dv_display_name": "DaVita Supplies",
             "created_date": iso_today(),
         }
         for k, v in defaults.items():
@@ -559,6 +561,16 @@ class HHDApp(tk.Tk):
         self.update_idletasks()
         request_windows_medical_blue_titlebar(self.winfo_id())
 
+        self.inventory_font_default = 12
+        self.inventory_font_min = self.inventory_font_default - 5
+        self.inventory_font_max = self.inventory_font_default + 5
+        try:
+            saved_font_size = int(self.settings_data.get("inventory_font_size", self.inventory_font_default))
+        except Exception:
+            saved_font_size = self.inventory_font_default
+        self.inventory_font_size = max(self.inventory_font_min, min(self.inventory_font_max, saved_font_size))
+        self._inventory_font_labels = []
+
         self.style = ttk.Style()
         self.style.theme_use("clam")
         self.configure_styles()
@@ -580,10 +592,14 @@ class HHDApp(tk.Tk):
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.bind("<Configure>", self.remember_window_geometry_event)
+        self.create_status_led_images()
+        self._status_trees = []
+        self._blink_on = True
         self.build_sidebar()
         self.show_dashboard()
         self.schedule_clock_update()
         self.schedule_auto_backup()
+        self.after(600, self.blink_status_leds)
 
     def set_app_icon(self):
         """Set the Windows taskbar/Alt-Tab/window icon as reliably as Tk allows."""
@@ -699,10 +715,81 @@ class HHDApp(tk.Tk):
         except Exception:
             pass
 
+    def group_display_name(self, internal_group):
+        if internal_group == GROUP_NX:
+            return self.db.get_setting("group_nx_display_name", GROUP_NX)
+        if internal_group == GROUP_DV:
+            return self.db.get_setting("group_dv_display_name", GROUP_DV)
+        return internal_group
+
+    def internal_group_from_display(self, display_name):
+        if display_name == self.group_display_name(GROUP_NX):
+            return GROUP_NX
+        if display_name == self.group_display_name(GROUP_DV):
+            return GROUP_DV
+        return display_name
+
+    def create_status_led_images(self):
+        self._led_images = {}
+        color_map = {"off": "#18384C", "ok": GREEN, "low": YELLOW, "reorder": RED}
+        for name, color in color_map.items():
+            image = tk.PhotoImage(width=18, height=18)
+            image.put(BLUE_PANEL, to=(0, 0, 18, 18))
+            spans = {2:(7,11),3:(5,13),4:(4,14),5:(3,15),6:(2,16),7:(2,16),8:(2,16),9:(2,16),10:(2,16),11:(2,16),12:(3,15),13:(4,14),14:(5,13),15:(7,11)}
+            for y, (x1, x2) in spans.items():
+                image.put(color, to=(x1, y, x2, y+1))
+            self._led_images[name] = image
+
+    def register_status_tree(self, tree, status_by_item):
+        self._status_trees.append((tree, status_by_item))
+
+    def blink_status_leds(self):
+        self._blink_on = not self._blink_on
+        active = []
+        for tree, status_by_item in self._status_trees:
+            try:
+                if not tree.winfo_exists():
+                    continue
+                active.append((tree, status_by_item))
+                for iid, status in status_by_item.items():
+                    if not tree.exists(iid):
+                        continue
+                    if status == "OK":
+                        image = self._led_images["ok"]
+                    elif status == "LOW":
+                        image = self._led_images["low"] if self._blink_on else self._led_images["off"]
+                    else:
+                        image = self._led_images["reorder"] if self._blink_on else self._led_images["off"]
+                    tree.item(iid, image=image)
+            except Exception:
+                pass
+        self._status_trees = active
+        self.after(600, self.blink_status_leds)
+
     def configure_styles(self):
         self.style.configure("Treeview", background=BLUE_PANEL, foreground=TEXT, fieldbackground=BLUE_PANEL, rowheight=28, font=("Segoe UI", 10))
         self.style.configure("Treeview.Heading", background=BLUE_HEADER, foreground=TEXT, font=("Segoe UI", 10, "bold"))
         self.style.map("Treeview", background=[("selected", "#126A9F")], foreground=[("selected", "white")])
+
+        self.style.configure(
+            "Inventory.Treeview",
+            background=BLUE_PANEL,
+            foreground=TEXT,
+            fieldbackground=BLUE_PANEL,
+            rowheight=max(26, self.inventory_font_size + 22),
+            font=("Segoe UI", self.inventory_font_size),
+        )
+        self.style.configure(
+            "Inventory.Treeview.Heading",
+            background=BLUE_HEADER,
+            foreground=TEXT,
+            font=("Segoe UI", max(9, self.inventory_font_size - 1), "bold"),
+        )
+        self.style.map(
+            "Inventory.Treeview",
+            background=[("selected", "#126A9F")],
+            foreground=[("selected", "white")],
+        )
 
         # Dark themed combo boxes. The map() calls are important on Windows,
         # especially for readonly comboboxes, otherwise the field can turn white.
@@ -736,16 +823,115 @@ class HHDApp(tk.Tk):
         self.option_add("*TCombobox*Listbox.selectForeground", TEXT)
         self.option_add("*TCombobox*Listbox.borderWidth", 1)
 
+    def status_display_text(self, status):
+        """Return visibly bold Unicode status text for the Status column."""
+        return {
+            "OK": "𝗢𝗞",
+            "LOW": "𝗟𝗢𝗪",
+            "RE-ORDER": "𝗥𝗘-𝗢𝗥𝗗𝗘𝗥",
+        }.get(status, status)
+
+    def refresh_inventory_font_style(self):
+        self.style.configure(
+            "Inventory.Treeview",
+            rowheight=max(26, self.inventory_font_size + 22),
+            font=("Segoe UI", self.inventory_font_size),
+        )
+        self.style.configure(
+            "Inventory.Treeview.Heading",
+            font=("Segoe UI", max(9, self.inventory_font_size - 1), "bold"),
+        )
+        self.settings_data["inventory_font_size"] = self.inventory_font_size
+        self.save_local_settings()
+
+        active_labels = []
+        for label in self._inventory_font_labels:
+            try:
+                if label.winfo_exists():
+                    label.config(text=f"{self.inventory_font_size} pt")
+                    active_labels.append(label)
+            except Exception:
+                pass
+        self._inventory_font_labels = active_labels
+
+    def adjust_inventory_font(self, delta):
+        new_size = max(
+            self.inventory_font_min,
+            min(self.inventory_font_max, self.inventory_font_size + delta)
+        )
+        if new_size == self.inventory_font_size:
+            return
+        self.inventory_font_size = new_size
+        self.refresh_inventory_font_style()
+
+    def build_inventory_font_controls(self, parent):
+        controls = tk.Frame(parent, bg=BLUE_PANEL)
+        controls.pack(fill="x", pady=(0, 8))
+
+        tk.Label(
+            controls,
+            text="Item font:",
+            bg=BLUE_PANEL,
+            fg=MUTED,
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="left")
+
+        tk.Button(
+            controls,
+            text="−",
+            command=lambda: self.adjust_inventory_font(-1),
+            bg=BUTTON_BG,
+            fg=TEXT,
+            activebackground=BUTTON_HOVER,
+            activeforeground=TEXT,
+            relief="flat",
+            width=3,
+            font=("Segoe UI", 11, "bold"),
+            cursor="hand2",
+        ).pack(side="left", padx=(8, 3))
+
+        tk.Button(
+            controls,
+            text="+",
+            command=lambda: self.adjust_inventory_font(1),
+            bg=BUTTON_BG,
+            fg=TEXT,
+            activebackground=BUTTON_HOVER,
+            activeforeground=TEXT,
+            relief="flat",
+            width=3,
+            font=("Segoe UI", 11, "bold"),
+            cursor="hand2",
+        ).pack(side="left", padx=3)
+
+        size_label = tk.Label(
+            controls,
+            text=f"{self.inventory_font_size} pt",
+            bg=BLUE_PANEL,
+            fg=CYAN,
+            font=("Segoe UI", 9, "bold"),
+        )
+        size_label.pack(side="left", padx=8)
+        self._inventory_font_labels.append(size_label)
+
+        tk.Label(
+            controls,
+            text=f"Range: {self.inventory_font_min}–{self.inventory_font_max} pt",
+            bg=BLUE_PANEL,
+            fg=MUTED,
+            font=("Segoe UI", 8),
+        ).pack(side="left", padx=4)
+
     def button(self, parent, text, command):
         return tk.Button(parent, text=text, command=command, bg=BUTTON_BG, fg=TEXT, activebackground=BUTTON_HOVER,
                          activeforeground=TEXT, relief="flat", padx=14, pady=7, font=("Segoe UI", 10), cursor="hand2")
 
     def build_sidebar(self):
-        tk.Label(self.sidebar, text="HHD MENU", bg=BLUE_PANEL, fg=CYAN, font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=18, pady=(18, 8))
+        tk.Label(self.sidebar, text="HHD MENU", bg=BLUE_PANEL, fg=CYAN, font=("Segoe UI", 13, "bold")).pack(anchor="w", padx=18, pady=(18, 8))
         buttons = [
             ("⌂  Dashboard", self.show_dashboard),
-            ("▣  NxStage Supplies", lambda: self.show_inventory(GROUP_NX)),
-            ("▣  DaVita Supplies", lambda: self.show_inventory(GROUP_DV)),
+            (f"▣  {self.group_display_name(GROUP_NX)}", lambda: self.show_inventory(GROUP_NX)),
+            (f"▣  {self.group_display_name(GROUP_DV)}", lambda: self.show_inventory(GROUP_DV)),
             ("☑  Log Session", self.show_log_session),
             ("＋  Received Inventory", self.show_received),
             ("⚙  Settings / Items", self.show_settings),
@@ -755,7 +941,7 @@ class HHDApp(tk.Tk):
         ]
         for text, cmd in buttons:
             tk.Button(self.sidebar, text=text, command=cmd, anchor="w", bg=BLUE_PANEL, fg=TEXT, activebackground=BLUE_HEADER,
-                      activeforeground=TEXT, relief="flat", bd=0, font=("Segoe UI", 10), padx=14, pady=10, cursor="hand2").pack(fill="x", padx=8, pady=2)
+                      activeforeground=TEXT, relief="flat", bd=0, font=("Segoe UI", 12), padx=14, pady=11, cursor="hand2").pack(fill="x", padx=8, pady=2)
 
     def clear_content(self):
         for w in self.content.winfo_children():
@@ -782,10 +968,10 @@ class HHDApp(tk.Tk):
 
         row = tk.Frame(self.content, bg=BLUE_BG)
         row.pack(fill="both", expand=True, padx=16, pady=8)
-        p1, b1 = self.make_panel(row, "NXSTAGE SUPPLIES")
+        p1, b1 = self.make_panel(row, self.group_display_name(GROUP_NX).upper())
         p1.pack(side="left", fill="both", expand=True, padx=(0, 8))
         self.inventory_tree(b1, GROUP_NX, compact=True)
-        p2, b2 = self.make_panel(row, "DAVITA SUPPLIES")
+        p2, b2 = self.make_panel(row, self.group_display_name(GROUP_DV).upper())
         p2.pack(side="left", fill="both", expand=True, padx=(8, 0))
         self.inventory_tree(b2, GROUP_DV, compact=True)
 
@@ -811,15 +997,33 @@ class HHDApp(tk.Tk):
             tk.Label(card, text=value, bg=BLUE_PANEL_2, fg=TEXT, justify="left", font=("Segoe UI", 14, "bold")).pack(anchor="w", padx=12, pady=(0, 10))
 
     def inventory_tree(self, parent, group, compact=False):
+        self.build_inventory_font_controls(parent)
+
         cols = ("item", "units", "weeks", "status")
-        tree = ttk.Treeview(parent, columns=cols, show="headings", height=8 if compact else 18)
-        for c, h, w in [("item","Item",300),("units","Units Left",90),("weeks","Weeks Left",90),("status","Status",110)]:
+        tree = ttk.Treeview(
+            parent,
+            columns=cols,
+            show="tree headings",
+            height=8 if compact else 18,
+            style="Inventory.Treeview",
+        )
+        tree.heading("#0", text="Alert")
+        tree.column("#0", width=66, minwidth=66, stretch=False, anchor="center")
+        for c, h, w in [
+            ("item", "Item", 320),
+            ("units", "Units Left", 100),
+            ("weeks", "Weeks Left", 100),
+            ("status", "Status", 140),
+        ]:
             tree.heading(c, text=h)
-            tree.column(c, width=w, anchor="w" if c=="item" else "center")
+            tree.column(c, width=w, anchor="w" if c == "item" else "center")
         tree.pack(fill="both", expand=True)
+
         tree.tag_configure("ok", foreground=GREEN)
         tree.tag_configure("low", foreground=YELLOW)
         tree.tag_configure("reorder", foreground=RED)
+
+        status_by_item = {}
         for item in self.db.items(group):
             current, *_ = self.db.current_count(item)
             status, _ = self.db.status(item, current)
@@ -827,20 +1031,49 @@ class HHDApp(tk.Tk):
             weeks_txt = "Manual" if weeks is None else f"{weeks:.1f}"
             units_txt = f"{current:.1f}".rstrip("0").rstrip(".")
             tag = "ok" if status == "OK" else ("low" if status == "LOW" else "reorder")
-            tree.insert("", "end", iid=str(item["id"]), values=(item["item_name"], units_txt, weeks_txt, status), tags=(tag,))
+            image = (
+                self._led_images["ok"]
+                if status == "OK"
+                else self._led_images["low"]
+                if status == "LOW"
+                else self._led_images["reorder"]
+            )
+            iid = str(item["id"])
+            tree.insert(
+                "",
+                "end",
+                iid=iid,
+                image=image,
+                values=(
+                    item["item_name"],
+                    units_txt,
+                    weeks_txt,
+                    self.status_display_text(status),
+                ),
+                tags=(tag,),
+            )
+            status_by_item[iid] = status
+
+        self.register_status_tree(tree, status_by_item)
+
         if not compact:
-            tree.bind("<Double-1>", lambda e: self.open_item_editor(int(tree.selection()[0])) if tree.selection() else None)
+            tree.bind(
+                "<Double-1>",
+                lambda e: self.open_item_editor(int(tree.selection()[0]))
+                if tree.selection()
+                else None,
+            )
         return tree
 
     def show_inventory(self, group):
         self.clear_content()
         top = tk.Frame(self.content, bg=BLUE_BG)
         top.pack(fill="x", padx=16, pady=12)
-        tk.Label(top, text=group, bg=BLUE_BG, fg=CYAN, font=("Segoe UI", 16, "bold")).pack(side="left")
+        tk.Label(top, text=self.group_display_name(group), bg=BLUE_BG, fg=CYAN, font=("Segoe UI", 17, "bold")).pack(side="left")
         self.button(top, "Add New Item", lambda: self.open_item_editor(None, default_group=group)).pack(side="right", padx=6)
         self.button(top, "Remove Selected Item", lambda: self.remove_selected_item()).pack(side="right", padx=6)
         self.button(top, "Edit / Rename Selected", lambda: self.edit_selected_item()).pack(side="right", padx=6)
-        p, b = self.make_panel(self.content, f"{group} Inventory")
+        p, b = self.make_panel(self.content, f"{self.group_display_name(group)} Inventory")
         p.pack(fill="both", expand=True, padx=16, pady=(0, 16))
         self.current_tree = self.inventory_tree(b, group, compact=False)
 
@@ -891,7 +1124,7 @@ class HHDApp(tk.Tk):
         def val(key, default):
             return str(default if is_new else item[key])
 
-        group_var = tk.StringVar(value=default_group if is_new else item["group_name"])
+        group_var = tk.StringVar(value=self.group_display_name(default_group if is_new else item["group_name"]))
         name_var = tk.StringVar(value="" if is_new else item["item_name"])
         rows = [
             ("group_name", "Inventory Group", group_var, "combo"),
@@ -910,7 +1143,7 @@ class HHDApp(tk.Tk):
             vars_[key] = var
             tk.Label(form, text=label, bg=BLUE_PANEL, fg=TEXT, font=("Segoe UI", 10)).grid(row=idx, column=0, sticky="w", padx=14, pady=7)
             if typ == "combo":
-                e = ttk.Combobox(form, textvariable=var, values=[GROUP_NX, GROUP_DV], width=34, state="readonly")
+                e = ttk.Combobox(form, textvariable=var, values=[self.group_display_name(GROUP_NX), self.group_display_name(GROUP_DV)], width=34, state="readonly")
             else:
                 e = tk.Entry(form, textvariable=var, bg=INPUT_BG, fg=TEXT, insertbackground=TEXT, relief="solid", bd=1, font=("Segoe UI", 10), width=38)
             e.grid(row=idx, column=1, sticky="ew", padx=14, pady=7)
@@ -935,7 +1168,7 @@ class HHDApp(tk.Tk):
 
         def save():
             try:
-                group = vars_["group_name"].get()
+                group = self.internal_group_from_display(vars_["group_name"].get())
                 item_name = vars_["item_name"].get().strip()
                 data = {
                     "group_name": group,
@@ -990,7 +1223,7 @@ class HHDApp(tk.Tk):
 
         for r in items:
             if name_counts[r["item_name"]] > 1:
-                label = f"{r['group_name']} — {r['item_name']}"
+                label = f"{self.group_display_name(r['group_name'])} — {r['item_name']}"
             else:
                 label = r["item_name"]
             labels.append(label)
@@ -1048,7 +1281,7 @@ class HHDApp(tk.Tk):
             tree.heading(c, text=h); tree.column(c, width=w, anchor="w")
         tree.pack(fill="both", expand=True)
         for r in self.db.recent_received(50):
-            tree.insert("", "end", values=(r["received_date"], r["group_name"], r["item_name"], r["units"], r["notes"] or ""))
+            tree.insert("", "end", values=(r["received_date"], self.group_display_name(r["group_name"]), r["item_name"], r["units"], r["notes"] or ""))
 
     def show_log_session(self):
         self.clear_content()
@@ -1103,7 +1336,15 @@ class HHDApp(tk.Tk):
         patient_var = tk.StringVar(value=self.db.get_setting("patient_name", "Patient Name"))
         sessions_var = tk.StringVar(value=self.db.get_setting("sessions_per_week", "4"))
         first_day_var = tk.StringVar(value=self.db.get_setting("first_session_day", "Sunday"))
-        rows = [("Patient Name", patient_var, "entry"), ("Dialysis Sessions Per Week", sessions_var, "entry"), ("Week's First Session Day", first_day_var, "combo")]
+        nx_group_var = tk.StringVar(value=self.group_display_name(GROUP_NX))
+        dv_group_var = tk.StringVar(value=self.group_display_name(GROUP_DV))
+        rows = [
+            ("Patient Name", patient_var, "entry"),
+            ("Dialysis Sessions Per Week", sessions_var, "entry"),
+            ("Week's First Session Day", first_day_var, "combo"),
+            ("First Inventory Group Name", nx_group_var, "entry"),
+            ("Second Inventory Group Name", dv_group_var, "entry"),
+        ]
         for idx, (lab, var, typ) in enumerate(rows):
             tk.Label(body, text=lab, bg=BLUE_PANEL, fg=TEXT).grid(row=idx, column=0, sticky="w", padx=10, pady=8)
             if typ == "combo":
@@ -1118,18 +1359,23 @@ class HHDApp(tk.Tk):
                 self.db.set_setting("patient_name", patient_var.get().strip() or "Patient Name")
                 self.db.set_setting("sessions_per_week", sessions_var.get().strip() or "4")
                 self.db.set_setting("first_session_day", first_day_var.get())
+                self.db.set_setting("group_nx_display_name", nx_group_var.get().strip() or GROUP_NX)
+                self.db.set_setting("group_dv_display_name", dv_group_var.get().strip() or GROUP_DV)
                 self.save_local_settings()
+                for widget in self.sidebar.winfo_children():
+                    widget.destroy()
+                self.build_sidebar()
                 self.show_settings()
             except Exception as ex:
                 messagebox.showerror(APP_NAME, f"Could not save settings:\n{ex}")
-        self.button(body, "Save Settings", save_settings).grid(row=3, column=1, sticky="w", padx=10, pady=14)
+        self.button(body, "Save Settings", save_settings).grid(row=5, column=1, sticky="w", padx=10, pady=14)
 
         p2, b2 = self.make_panel(self.content, "Item Management")
         p2.pack(fill="both", expand=True, padx=16, pady=(0, 16))
         row = tk.Frame(b2, bg=BLUE_PANEL)
         row.pack(fill="x", pady=(0, 8))
-        self.button(row, "Add NxStage Item", lambda: self.open_item_editor(None, GROUP_NX)).pack(side="left", padx=4)
-        self.button(row, "Add DaVita Item", lambda: self.open_item_editor(None, GROUP_DV)).pack(side="left", padx=4)
+        self.button(row, f"Add {self.group_display_name(GROUP_NX)} Item", lambda: self.open_item_editor(None, GROUP_NX)).pack(side="left", padx=4)
+        self.button(row, f"Add {self.group_display_name(GROUP_DV)} Item", lambda: self.open_item_editor(None, GROUP_DV)).pack(side="left", padx=4)
         tk.Label(row, text="Open a supply page to edit, rename, or remove existing items.", bg=BLUE_PANEL, fg=MUTED).pack(side="left", padx=12)
 
     def export_csv(self):
