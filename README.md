@@ -12,8 +12,8 @@ The program helps a home hemodialysis caregiver or patient maintain a clear, loc
 ## Main Features
 
 - Tracks two supply groups:
-  - NxStage Supplies
-  - DaVita Supplies
+  - NxStage Supplies (configurable group name)
+  - DaVita Supplies (configurable group name)
 - Configurable patient name.
 - Configurable dialysis schedule.
 - Per-item settings:
