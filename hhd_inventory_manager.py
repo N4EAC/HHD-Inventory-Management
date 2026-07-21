@@ -23,7 +23,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
 APP_NAME = "HHD Inventory Manager"
-APP_VERSION = "1.0.8"
+APP_VERSION = "1.0.10"
 DB_NAME = "hhd_inventory.db"
 SETTINGS_FILE = "hhd_inventory_settings.json"
 APP_FOLDER_NAME = "HHD Inventory Manager"
@@ -1544,28 +1544,65 @@ class HHDApp(tk.Tk):
     def selected_item_id_from_value(self, value):
         return getattr(self, "_item_dropdown_map", {}).get(value)
 
-    def draw_inventory_history_chart(self, canvas, item, points):
+    def draw_inventory_history_chart(
+        self, canvas, item, points, period_start=None, period_end=None
+    ):
         canvas.delete("all")
         width = max(640, canvas.winfo_width())
         height = max(340, canvas.winfo_height())
-        left, right, top, bottom = 74, 28, 36, 58
+        left, right, top, bottom = 74, 28, 36, 66
         plot_w = max(100, width - left - right)
         plot_h = max(100, height - top - bottom)
+
+        period_end = period_end or date.today()
+        period_start = period_start or (
+            points[0][0] if points else period_end - timedelta(days=30)
+        )
+        if period_end < period_start:
+            period_start, period_end = period_end, period_start
+
+        total_seconds = max(
+            1.0,
+            (
+                datetime.combine(period_end, datetime.min.time())
+                - datetime.combine(period_start, datetime.min.time())
+            ).total_seconds(),
+        )
+
+        def x_for(day):
+            seconds = (
+                datetime.combine(day, datetime.min.time())
+                - datetime.combine(period_start, datetime.min.time())
+            ).total_seconds()
+            ratio = max(0.0, min(1.0, seconds / total_seconds))
+            return left + ratio * plot_w
 
         canvas.create_rectangle(
             left, top, left + plot_w, top + plot_h,
             outline=BORDER, fill="#052A43"
         )
 
-        if not points:
-            canvas.create_text(
-                width / 2, height / 2,
-                text="No inventory history is available for this period.",
-                fill=MUTED, font=("Segoe UI", 12)
+        available_start = points[0][0] if points else None
+        if available_start and available_start > period_start:
+            unavailable_right = x_for(available_start)
+            canvas.create_rectangle(
+                left,
+                top,
+                unavailable_right,
+                top + plot_h,
+                fill="#082338",
+                outline="",
             )
-            return
+            canvas.create_text(
+                left + max(8, (unavailable_right - left) / 2),
+                top + 22,
+                text="No calculated data before baseline",
+                fill=MUTED,
+                font=("Segoe UI", 9, "italic"),
+                anchor="center",
+            )
 
-        values = [value for _day, value in points]
+        values = [value for _day, value in points] if points else [0.0]
         threshold_values = [
             float(item["low_threshold"] or 0),
             float(item["min_threshold"] or 0),
@@ -1574,7 +1611,6 @@ class HHDApp(tk.Tk):
         y_max = max(1.0, math.ceil(y_max * 1.12))
         y_min = 0.0
 
-        # Grid and Y labels.
         for index in range(6):
             ratio = index / 5
             y = top + plot_h - ratio * plot_h
@@ -1594,7 +1630,6 @@ class HHDApp(tk.Tk):
         def y_for(value):
             return top + plot_h - ((value - y_min) / (y_max - y_min)) * plot_h
 
-        # Threshold reference lines.
         threshold_lines = [
             (float(item["low_threshold"] or 0), YELLOW, "LOW"),
             (float(item["min_threshold"] or 0), RED, "RE-ORDER"),
@@ -1614,53 +1649,80 @@ class HHDApp(tk.Tk):
                 font=("Segoe UI", 8, "bold")
             )
 
-        count = len(points)
-        xy = []
-        for index, (_day, value) in enumerate(points):
-            x = left if count == 1 else left + (index / (count - 1)) * plot_w
-            y = y_for(value)
-            xy.extend((x, y))
+        if points:
+            xy = []
+            for day, value in points:
+                xy.extend((x_for(day), y_for(value)))
 
-        if len(xy) >= 4:
-            canvas.create_line(*xy, fill=CYAN, width=3, smooth=True)
-        elif len(xy) == 2:
-            x, y = xy
-            canvas.create_oval(x - 4, y - 4, x + 4, y + 4, fill=CYAN, outline=CYAN)
+            if len(xy) >= 4:
+                canvas.create_line(*xy, fill=CYAN, width=3, smooth=False)
+            else:
+                x, y = xy
+                canvas.create_oval(
+                    x - 4, y - 4, x + 4, y + 4,
+                    fill=CYAN, outline=CYAN
+                )
 
-        # Selected points and date labels.
-        label_indexes = sorted(set([
-            0,
-            max(0, (count - 1) // 4),
-            max(0, (count - 1) // 2),
-            max(0, (count - 1) * 3 // 4),
-            count - 1,
-        ]))
-        for index in label_indexes:
-            day, value = points[index]
-            x = left if count == 1 else left + (index / (count - 1)) * plot_w
-            y = y_for(value)
-            canvas.create_oval(
-                x - 3, y - 3, x + 3, y + 3,
-                fill=TEXT, outline=CYAN
+            marker_indexes = sorted(set([
+                0,
+                max(0, (len(points) - 1) // 2),
+                len(points) - 1,
+            ]))
+            for index in marker_indexes:
+                day, value = points[index]
+                x = x_for(day)
+                y = y_for(value)
+                canvas.create_oval(
+                    x - 3, y - 3, x + 3, y + 3,
+                    fill=TEXT, outline=CYAN
+                )
+        else:
+            canvas.create_text(
+                width / 2,
+                height / 2,
+                text="No inventory history is available for this period.",
+                fill=MUTED,
+                font=("Segoe UI", 12),
+            )
+
+        # Always label the requested time period, not merely the available points.
+        tick_days = []
+        span_days = max(1, (period_end - period_start).days)
+        for ratio in (0.0, 0.25, 0.5, 0.75, 1.0):
+            tick_days.append(period_start + timedelta(days=round(span_days * ratio)))
+
+        for day in tick_days:
+            x = x_for(day)
+            canvas.create_line(
+                x, top + plot_h, x, top + plot_h + 5,
+                fill=MUTED
             )
             canvas.create_text(
-                x, top + plot_h + 18,
+                x,
+                top + plot_h + 17,
                 text=day.strftime("%m/%d/%y"),
-                fill=MUTED, anchor="n",
-                font=("Segoe UI", 8)
+                fill=MUTED,
+                anchor="n",
+                font=("Segoe UI", 8),
             )
 
-        first_day, first_value = points[0]
-        last_day, last_value = points[-1]
         canvas.create_text(
             left, 14,
             text=f"{item['item_name']} - inventory units over time",
             fill=TEXT, anchor="w",
             font=("Segoe UI", 12, "bold")
         )
+
+        if points:
+            first_value = points[0][1]
+            last_value = points[-1][1]
+            value_text = f"{first_value:.1f} → {last_value:.1f} units"
+        else:
+            value_text = "No calculated values"
+
         canvas.create_text(
             left + plot_w, 14,
-            text=f"{first_value:.1f} → {last_value:.1f} units",
+            text=value_text,
             fill=CYAN, anchor="e",
             font=("Segoe UI", 10, "bold")
         )
@@ -1743,7 +1805,7 @@ class HHDApp(tk.Tk):
         )
         canvas.pack(fill="both", expand=True)
 
-        chart_state = {"item": None, "points": []}
+        chart_state = {"item": None, "points": [], "start": None, "end": None}
 
         def refresh_chart(*_args):
             item_id = item_map.get(item_var.get())
@@ -1781,23 +1843,42 @@ class HHDApp(tk.Tk):
             )
             chart_state["item"] = item
             chart_state["points"] = points
+            chart_state["start"] = start_date
+            chart_state["end"] = end_date
+
+            requested_period = (
+                f"Period: {start_date.strftime('%m/%d/%Y')} - "
+                f"{end_date.strftime('%m/%d/%Y')}"
+            )
 
             if points:
                 values = [value for _day, value in points]
+                available_start = points[0][0]
+                availability_note = ""
+                if available_start > start_date:
+                    availability_note = (
+                        f"     Available data begins: "
+                        f"{available_start.strftime('%m/%d/%Y')}"
+                    )
+
                 summary_label.config(
                     text=(
-                        f"Period: {points[0][0].strftime('%m/%d/%Y')} - "
-                        f"{points[-1][0].strftime('%m/%d/%Y')}     "
-                        f"Start: {values[0]:.1f}     "
+                        f"{requested_period}     "
+                        f"First available: {values[0]:.1f}     "
                         f"Current: {values[-1]:.1f}     "
                         f"Minimum: {min(values):.1f}     "
                         f"Maximum: {max(values):.1f}"
+                        f"{availability_note}"
                     )
                 )
             else:
-                summary_label.config(text="No history is available for this selection.")
+                summary_label.config(
+                    text=f"{requested_period}     No history is available for this selection."
+                )
 
-            self.draw_inventory_history_chart(canvas, item, points)
+            self.draw_inventory_history_chart(
+                canvas, item, points, start_date, end_date
+            )
 
         self.button(
             controls, "Refresh Graphic", refresh_chart
@@ -1811,6 +1892,8 @@ class HHDApp(tk.Tk):
                 canvas,
                 chart_state["item"],
                 chart_state["points"],
+                chart_state["start"],
+                chart_state["end"],
             ) if chart_state["item"] is not None else None
         )
 
