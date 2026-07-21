@@ -106,7 +106,7 @@ dist\HHD_Inventory_Manager
 Open the included Inno Setup script:
 
 ```text
-HHD_Inventory_Manager_Setup_ProgramFiles_v1.0.4.iss
+HHD_Inventory_Manager_Setup_ProgramFiles_v1.0.10.iss
 ```
 
 Compile it with Inno Setup to create the Windows installer.
