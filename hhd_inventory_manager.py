@@ -17,12 +17,13 @@ import ctypes
 import ctypes.wintypes
 import json
 import shutil
-from datetime import datetime, date
+import math
+from datetime import datetime, date, timedelta
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
 APP_NAME = "HHD Inventory Manager"
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.8"
 DB_NAME = "hhd_inventory.db"
 SETTINGS_FILE = "hhd_inventory_settings.json"
 APP_FOLDER_NAME = "HHD Inventory Manager"
@@ -245,6 +246,7 @@ class InventoryDB:
             reusable_sessions REAL NOT NULL DEFAULT 1,
             lifespan_days INTEGER NOT NULL DEFAULT 0,
             auto_session_usage INTEGER NOT NULL DEFAULT 1,
+            full_attempt_usage INTEGER NOT NULL DEFAULT 0,
             active INTEGER NOT NULL DEFAULT 1,
             UNIQUE(group_name, item_name)
         );
@@ -275,6 +277,18 @@ class InventoryDB:
             FOREIGN KEY(item_id) REFERENCES items(id)
         );
         """)
+
+        # Database migration for v1.0.6. Items such as SAK can consume one
+        # reusable-session slot for every attempted treatment, including an
+        # incomplete treatment. Missed treatments never consume a slot.
+        item_columns = {
+            row["name"] for row in c.execute("PRAGMA table_info(items)").fetchall()
+        }
+        if "full_attempt_usage" not in item_columns:
+            c.execute(
+                "ALTER TABLE items ADD COLUMN full_attempt_usage INTEGER NOT NULL DEFAULT 0"
+            )
+
         defaults = {
             "patient_name": "Patient Name",
             "sessions_per_week": "4",
@@ -294,6 +308,14 @@ class InventoryDB:
                 )
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,1)
             """, (row[0], row[1], row[2], iso_today(), row[3], row[4], row[5], row[6], row[7], row[8], row[9]))
+
+        # Enable the rule for the default/existing SAK item. Once enabled, the
+        # database flag remains with the item even if the user renames it.
+        c.execute(
+            """UPDATE items
+               SET full_attempt_usage=1
+               WHERE UPPER(TRIM(item_name))='SAK'"""
+        )
         self.conn.commit()
 
     def get_setting(self, key, default=""):
@@ -315,7 +337,8 @@ class InventoryDB:
 
     def add_item(self, group_name, item_name, baseline_units=0, baseline_date=None,
                  min_threshold=0, low_threshold=0, units_per_session=0,
-                 units_per_week=0, reusable_sessions=1, lifespan_days=0, auto_session_usage=1):
+                 units_per_week=0, reusable_sessions=1, lifespan_days=0,
+                 auto_session_usage=1, full_attempt_usage=0):
         item_name = item_name.strip()
         if not item_name:
             raise ValueError("Item name cannot be blank.")
@@ -325,14 +348,15 @@ class InventoryDB:
         self.conn.execute("""
             INSERT INTO items(
                 group_name,item_name,baseline_units,baseline_date,min_threshold,low_threshold,
-                units_per_session,units_per_week,reusable_sessions,lifespan_days,auto_session_usage,active
+                units_per_session,units_per_week,reusable_sessions,lifespan_days,
+                auto_session_usage,full_attempt_usage,active
             )
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,1)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1)
         """, (
             group_name, item_name, float(baseline_units), baseline_date,
             float(min_threshold), float(low_threshold), float(units_per_session),
             float(units_per_week), max(float(reusable_sessions), 1.0),
-            int(lifespan_days), int(auto_session_usage)
+            int(lifespan_days), int(auto_session_usage), int(full_attempt_usage)
         ))
         self.conn.commit()
 
@@ -340,7 +364,7 @@ class InventoryDB:
         allowed = {
             "group_name", "item_name", "baseline_units", "baseline_date", "min_threshold",
             "low_threshold", "units_per_session", "units_per_week", "reusable_sessions",
-            "lifespan_days", "auto_session_usage", "active"
+            "lifespan_days", "auto_session_usage", "full_attempt_usage", "active"
         }
         parts, values = [], []
         for k, v in kwargs.items():
@@ -370,6 +394,19 @@ class InventoryDB:
         )
         self.conn.commit()
 
+    def session_by_id(self, session_id):
+        return self.conn.execute(
+            "SELECT * FROM session_log WHERE id=?",
+            (session_id,)
+        ).fetchone()
+
+    def update_session_notes(self, session_id, notes):
+        self.conn.execute(
+            "UPDATE session_log SET notes=? WHERE id=?",
+            (notes, session_id)
+        )
+        self.conn.commit()
+
     def received_sum(self, item_id, since_date):
         row = self.conn.execute(
             "SELECT COALESCE(SUM(units),0) AS total FROM received_inventory WHERE item_id=? AND received_date>=?",
@@ -384,10 +421,36 @@ class InventoryDB:
         ).fetchone()
         return float(row["total"])
 
-    def session_equiv_sum(self, since_date):
+    def session_usage_sum(self, item, since_date, through_date=None):
+        """
+        Return the number of treatment-use slots applicable to an item.
+
+        Normal items use the treatment equivalent. Items configured to count
+        every attempted treatment as a full use count Regular, Extra, and
+        Incomplete treatments as 1 each. Missed treatments count as 0.
+        """
+        clauses = ["session_date>=?"]
+        params = [since_date]
+        if through_date is not None:
+            clauses.append("session_date<=?")
+            params.append(through_date)
+        where_sql = " AND ".join(clauses)
+
+        if int(item["full_attempt_usage"] or 0) == 1:
+            expression = """
+                CASE
+                    WHEN LOWER(TRIM(session_type)) LIKE 'missed%' THEN 0
+                    ELSE 1
+                END
+            """
+        else:
+            expression = "session_equivalent"
+
         row = self.conn.execute(
-            "SELECT COALESCE(SUM(session_equivalent),0) AS total FROM session_log WHERE session_date>=?",
-            (since_date,)
+            f"""SELECT COALESCE(SUM({expression}),0) AS total
+                FROM session_log
+                WHERE {where_sql}""",
+            tuple(params),
         ).fetchone()
         return float(row["total"])
 
@@ -395,12 +458,88 @@ class InventoryDB:
         d = parse_date(since_date)
         return max(0, (date.today() - d).days / 7.0)
 
+    def historical_count_as_of(self, item, as_of_date):
+        """Reconstruct calculated inventory for an item on a specific date."""
+        as_of = parse_date(as_of_date)
+        baseline_date = parse_date(
+            item["baseline_date"] or self.get_setting("created_date", iso_today())
+        )
+        if as_of < baseline_date:
+            return None
+
+        as_of_iso = as_of.isoformat()
+        baseline_iso = baseline_date.isoformat()
+
+        received_row = self.conn.execute(
+            """SELECT COALESCE(SUM(units),0) AS total
+               FROM received_inventory
+               WHERE item_id=? AND received_date>=? AND received_date<=?""",
+            (item["id"], baseline_iso, as_of_iso),
+        ).fetchone()
+        correction_row = self.conn.execute(
+            """SELECT COALESCE(SUM(units_delta),0) AS total
+               FROM corrections
+               WHERE item_id=? AND correction_date>=? AND correction_date<=?""",
+            (item["id"], baseline_iso, as_of_iso),
+        ).fetchone()
+        received = float(received_row["total"])
+        corrections = float(correction_row["total"])
+        sessions = self.session_usage_sum(item, baseline_iso, as_of_iso)
+
+        session_usage = 0.0
+        if int(item["auto_session_usage"]) == 1:
+            reusable = max(float(item["reusable_sessions"] or 1), 1.0)
+            session_usage = sessions * (
+                float(item["units_per_session"]) / reusable
+            )
+
+        elapsed_weeks = max(0.0, (as_of - baseline_date).days / 7.0)
+        weekly_usage = elapsed_weeks * float(item["units_per_week"])
+        current = (
+            float(item["baseline_units"])
+            + received
+            + corrections
+            - session_usage
+            - weekly_usage
+        )
+        return max(0.0, current)
+
+    def inventory_history(self, item_id, start_date, end_date, max_points=180):
+        item = self.item_by_id(item_id)
+        if not item:
+            return []
+
+        baseline_date = parse_date(
+            item["baseline_date"] or self.get_setting("created_date", iso_today())
+        )
+        start = max(parse_date(start_date), baseline_date)
+        end = parse_date(end_date)
+        if end < start:
+            return []
+
+        total_days = (end - start).days
+        step_days = max(1, math.ceil(max(1, total_days) / max(1, max_points - 1)))
+
+        points = []
+        cursor = start
+        while cursor <= end:
+            value = self.historical_count_as_of(item, cursor)
+            if value is not None:
+                points.append((cursor, value))
+            cursor += timedelta(days=step_days)
+
+        if not points or points[-1][0] != end:
+            value = self.historical_count_as_of(item, end)
+            if value is not None:
+                points.append((end, value))
+        return points
+
     def current_count(self, item):
         baseline = float(item["baseline_units"])
         since = item["baseline_date"] or self.get_setting("created_date", iso_today())
         received = self.received_sum(item["id"], since)
         corrections = self.corrections_sum(item["id"], since)
-        sessions = self.session_equiv_sum(since)
+        sessions = self.session_usage_sum(item, since)
 
         session_usage = 0.0
         if int(item["auto_session_usage"]) == 1:
@@ -678,14 +817,94 @@ class HHDApp(tk.Tk):
         self.after(30000, self.schedule_clock_update)
 
     def show_about(self):
-        messagebox.showinfo(
-            "About HHD Inventory Manager",
-            f"{APP_NAME} v{APP_VERSION}\n\n"
-            "Created by Eduardo A. de Carvalho,\n"
-            "husband and caregiver of Joelle.\n\n"
-            "This software is an inventory tracking tool only. "
-            "Always verify physical inventory before treatment."
+        win = tk.Toplevel(self)
+        win.title(f"About {APP_NAME}")
+        win.configure(bg=BLUE_BG)
+        win.resizable(False, False)
+        self.center_child_window(win, 520, 390)
+        win.transient(self)
+        win.grab_set()
+
+        header = tk.Frame(win, bg=BLUE_HEADER, height=72)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+
+        tk.Label(
+            header,
+            text="HHDIM",
+            bg=BLUE_HEADER,
+            fg=CYAN,
+            font=("Segoe UI", 22, "bold"),
+        ).pack(side="left", padx=(22, 12), pady=16)
+
+        title_area = tk.Frame(header, bg=BLUE_HEADER)
+        title_area.pack(side="left", fill="both", expand=True, pady=12)
+        tk.Label(
+            title_area,
+            text=APP_NAME,
+            bg=BLUE_HEADER,
+            fg=TEXT,
+            font=("Segoe UI", 16, "bold"),
+        ).pack(anchor="w")
+        tk.Label(
+            title_area,
+            text=f"Version {APP_VERSION}",
+            bg=BLUE_HEADER,
+            fg=MUTED,
+            font=("Segoe UI", 10, "bold"),
+        ).pack(anchor="w", pady=(3, 0))
+
+        body = tk.Frame(
+            win,
+            bg=BLUE_PANEL,
+            highlightbackground=BORDER,
+            highlightthickness=1,
         )
+        body.pack(fill="both", expand=True, padx=18, pady=18)
+
+        tk.Label(
+            body,
+            text="Home Hemodialysis Inventory Management",
+            bg=BLUE_PANEL,
+            fg=CYAN,
+            font=("Segoe UI", 12, "bold"),
+        ).pack(anchor="w", padx=18, pady=(18, 10))
+
+        tk.Label(
+            body,
+            text=(
+                "Created by Eduardo A. de Carvalho,\n"
+                "husband and caregiver of Joelle."
+            ),
+            bg=BLUE_PANEL,
+            fg=TEXT,
+            justify="left",
+            font=("Segoe UI", 11),
+        ).pack(anchor="w", padx=18, pady=(0, 16))
+
+        divider = tk.Frame(body, bg=BORDER, height=1)
+        divider.pack(fill="x", padx=18, pady=(0, 16))
+
+        tk.Label(
+            body,
+            text=(
+                "This software is an inventory tracking tool only.\n"
+                "Always verify physical inventory before treatment."
+            ),
+            bg=BLUE_PANEL,
+            fg=MUTED,
+            justify="left",
+            wraplength=440,
+            font=("Segoe UI", 10),
+        ).pack(anchor="w", padx=18)
+
+        self.button(body, "Close", win.destroy).pack(
+            side="bottom", anchor="e", padx=18, pady=18
+        )
+
+        win.bind("<Escape>", lambda _event: win.destroy())
+        win.focus_set()
+
 
     def import_database_action(self):
         filename = filedialog.askopenfilename(
@@ -864,7 +1083,7 @@ class HHDApp(tk.Tk):
         self.inventory_font_size = new_size
         self.refresh_inventory_font_style()
 
-    def build_inventory_font_controls(self, parent):
+    def build_inventory_font_controls(self, parent, compact=False):
         controls = tk.Frame(parent, bg=BLUE_PANEL)
         controls.pack(fill="x", pady=(0, 8))
 
@@ -914,25 +1133,56 @@ class HHDApp(tk.Tk):
         size_label.pack(side="left", padx=8)
         self._inventory_font_labels.append(size_label)
 
-        tk.Label(
-            controls,
-            text=f"Range: {self.inventory_font_min}–{self.inventory_font_max} pt",
-            bg=BLUE_PANEL,
-            fg=MUTED,
-            font=("Segoe UI", 8),
-        ).pack(side="left", padx=4)
+        if not compact:
+            tk.Label(
+                controls,
+                text=f"Range: {self.inventory_font_min}–{self.inventory_font_max} pt",
+                bg=BLUE_PANEL,
+                fg=MUTED,
+                font=("Segoe UI", 8),
+            ).pack(side="left", padx=4)
 
     def button(self, parent, text, command):
         return tk.Button(parent, text=text, command=command, bg=BUTTON_BG, fg=TEXT, activebackground=BUTTON_HOVER,
                          activeforeground=TEXT, relief="flat", padx=14, pady=7, font=("Segoe UI", 10), cursor="hand2")
 
     def build_sidebar(self):
-        tk.Label(self.sidebar, text="HHD MENU", bg=BLUE_PANEL, fg=CYAN, font=("Segoe UI", 13, "bold")).pack(anchor="w", padx=18, pady=(18, 8))
+        bottom = tk.Frame(self.sidebar, bg=BLUE_PANEL)
+        bottom.pack(side="bottom", fill="x", padx=8, pady=(8, 14))
+
+        tk.Button(
+            bottom,
+            text="✓  Submit Treatment",
+            command=self.show_log_session,
+            anchor="center",
+            bg=BLUE_HEADER,
+            fg=TEXT,
+            activebackground=BUTTON_HOVER,
+            activeforeground=TEXT,
+            relief="raised",
+            bd=1,
+            font=("Segoe UI", 12, "bold"),
+            padx=10,
+            pady=12,
+            cursor="hand2",
+        ).pack(fill="x")
+
+        menu = tk.Frame(self.sidebar, bg=BLUE_PANEL)
+        menu.pack(side="top", fill="both", expand=True)
+
+        tk.Label(
+            menu,
+            text="HHD MENU",
+            bg=BLUE_PANEL,
+            fg=CYAN,
+            font=("Segoe UI", 13, "bold"),
+        ).pack(anchor="w", padx=18, pady=(18, 8))
+
         buttons = [
             ("⌂  Dashboard", self.show_dashboard),
             (f"▣  {self.group_display_name(GROUP_NX)}", lambda: self.show_inventory(GROUP_NX)),
             (f"▣  {self.group_display_name(GROUP_DV)}", lambda: self.show_inventory(GROUP_DV)),
-            ("☑  Log Session", self.show_log_session),
+            ("⌁  Inventory History", self.show_inventory_history),
             ("＋  Received Inventory", self.show_received),
             ("⚙  Settings / Items", self.show_settings),
             ("⇧  Import Database", self.import_database_action),
@@ -940,8 +1190,22 @@ class HHDApp(tk.Tk):
             ("ⓘ  About", self.show_about),
         ]
         for text, cmd in buttons:
-            tk.Button(self.sidebar, text=text, command=cmd, anchor="w", bg=BLUE_PANEL, fg=TEXT, activebackground=BLUE_HEADER,
-                      activeforeground=TEXT, relief="flat", bd=0, font=("Segoe UI", 12), padx=14, pady=11, cursor="hand2").pack(fill="x", padx=8, pady=2)
+            tk.Button(
+                menu,
+                text=text,
+                command=cmd,
+                anchor="w",
+                bg=BLUE_PANEL,
+                fg=TEXT,
+                activebackground=BLUE_HEADER,
+                activeforeground=TEXT,
+                relief="flat",
+                bd=0,
+                font=("Segoe UI", 12),
+                padx=14,
+                pady=10,
+                cursor="hand2",
+            ).pack(fill="x", padx=8, pady=1)
 
     def clear_content(self):
         for w in self.content.winfo_children():
@@ -964,15 +1228,20 @@ class HHDApp(tk.Tk):
                                        bg=BLUE_BG, fg=TEXT, font=("Segoe UI", 12))
         self.datetime_label.pack(side="left", padx=40)
         self.button(top, "Add Received Inventory", self.show_received).pack(side="right", padx=6)
-        self.button(top, "Log Session", self.show_log_session).pack(side="right", padx=6)
+        self.button(top, "Submit Treatment", self.show_log_session).pack(side="right", padx=6)
 
         row = tk.Frame(self.content, bg=BLUE_BG)
         row.pack(fill="both", expand=True, padx=16, pady=8)
+        row.grid_columnconfigure(0, weight=1, uniform="inventory_groups")
+        row.grid_columnconfigure(1, weight=1, uniform="inventory_groups")
+        row.grid_rowconfigure(0, weight=1)
+
         p1, b1 = self.make_panel(row, self.group_display_name(GROUP_NX).upper())
-        p1.pack(side="left", fill="both", expand=True, padx=(0, 8))
+        p1.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         self.inventory_tree(b1, GROUP_NX, compact=True)
+
         p2, b2 = self.make_panel(row, self.group_display_name(GROUP_DV).upper())
-        p2.pack(side="left", fill="both", expand=True, padx=(8, 0))
+        p2.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
         self.inventory_tree(b2, GROUP_DV, compact=True)
 
         glance, body = self.make_panel(self.content, "AT A GLANCE")
@@ -997,7 +1266,7 @@ class HHDApp(tk.Tk):
             tk.Label(card, text=value, bg=BLUE_PANEL_2, fg=TEXT, justify="left", font=("Segoe UI", 14, "bold")).pack(anchor="w", padx=12, pady=(0, 10))
 
     def inventory_tree(self, parent, group, compact=False):
-        self.build_inventory_font_controls(parent)
+        self.build_inventory_font_controls(parent, compact=compact)
 
         cols = ("item", "units", "weeks", "status")
         tree = ttk.Treeview(
@@ -1008,15 +1277,32 @@ class HHDApp(tk.Tk):
             style="Inventory.Treeview",
         )
         tree.heading("#0", text="Alert")
-        tree.column("#0", width=66, minwidth=66, stretch=False, anchor="center")
-        for c, h, w in [
-            ("item", "Item", 320),
-            ("units", "Units Left", 100),
-            ("weeks", "Weeks Left", 100),
-            ("status", "Status", 140),
-        ]:
+        if compact:
+            tree.column("#0", width=54, minwidth=50, stretch=False, anchor="center")
+            column_specs = [
+                ("item", "Item", 150, True),
+                ("units", "Units", 65, False),
+                ("weeks", "Weeks", 68, False),
+                ("status", "Status", 76, False),
+            ]
+        else:
+            tree.column("#0", width=66, minwidth=60, stretch=False, anchor="center")
+            column_specs = [
+                ("item", "Item", 320, True),
+                ("units", "Units Left", 100, False),
+                ("weeks", "Weeks Left", 100, False),
+                ("status", "Status", 140, False),
+            ]
+
+        for c, h, w, can_stretch in column_specs:
             tree.heading(c, text=h)
-            tree.column(c, width=w, anchor="w" if c == "item" else "center")
+            tree.column(
+                c,
+                width=w,
+                minwidth=55 if c != "item" else 100,
+                stretch=can_stretch,
+                anchor="w" if c == "item" else "center",
+            )
         tree.pack(fill="both", expand=True)
 
         tree.tag_configure("ok", foreground=GREEN)
@@ -1110,7 +1396,7 @@ class HHDApp(tk.Tk):
         win = tk.Toplevel(self)
         win.configure(bg=BLUE_BG)
         win.title("Item Settings")
-        self.center_child_window(win, 580, 680)
+        self.center_child_window(win, 620, 735)
         win.transient(self)
         win.grab_set()
 
@@ -1151,7 +1437,30 @@ class HHDApp(tk.Tk):
         auto_var = tk.IntVar(value=1 if is_new else int(item["auto_session_usage"]))
         tk.Checkbutton(form, text="Auto-calculate usage from logged dialysis sessions", variable=auto_var,
                        bg=BLUE_PANEL, fg=TEXT, activebackground=BLUE_PANEL, activeforeground=TEXT,
-                       selectcolor=INPUT_BG, font=("Segoe UI", 10)).grid(row=len(rows), column=0, columnspan=2, sticky="w", padx=14, pady=10)
+                       selectcolor=INPUT_BG, font=("Segoe UI", 10)).grid(row=len(rows), column=0, columnspan=2, sticky="w", padx=14, pady=(10, 4))
+
+        full_attempt_var = tk.IntVar(
+            value=1 if (is_new and name_var.get().strip().upper() == "SAK")
+            else (0 if is_new else int(item["full_attempt_usage"] or 0))
+        )
+        tk.Checkbutton(
+            form,
+            text="Count incomplete treatments as a full use of this item",
+            variable=full_attempt_var,
+            bg=BLUE_PANEL,
+            fg=TEXT,
+            activebackground=BLUE_PANEL,
+            activeforeground=TEXT,
+            selectcolor=INPUT_BG,
+            font=("Segoe UI", 10),
+        ).grid(
+            row=len(rows)+1,
+            column=0,
+            columnspan=2,
+            sticky="w",
+            padx=14,
+            pady=(4, 8),
+        )
 
         sessions_per_week = self.db.get_setting("sessions_per_week", "4")
         tk.Label(
@@ -1162,7 +1471,7 @@ class HHDApp(tk.Tk):
             wraplength=500,
             justify="left",
             font=("Segoe UI", 9)
-        ).grid(row=len(rows)+1, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 10))
+        ).grid(row=len(rows)+2, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 10))
 
         form.columnconfigure(1, weight=1)
 
@@ -1182,6 +1491,7 @@ class HHDApp(tk.Tk):
                     "low_threshold": float(vars_["low_threshold"].get() or 0),
                     "min_threshold": float(vars_["min_threshold"].get() or 0),
                     "auto_session_usage": int(auto_var.get()),
+                    "full_attempt_usage": int(full_attempt_var.get()),
                 }
                 if not item_name:
                     raise ValueError("Item name cannot be blank.")
@@ -1234,6 +1544,280 @@ class HHDApp(tk.Tk):
     def selected_item_id_from_value(self, value):
         return getattr(self, "_item_dropdown_map", {}).get(value)
 
+    def draw_inventory_history_chart(self, canvas, item, points):
+        canvas.delete("all")
+        width = max(640, canvas.winfo_width())
+        height = max(340, canvas.winfo_height())
+        left, right, top, bottom = 74, 28, 36, 58
+        plot_w = max(100, width - left - right)
+        plot_h = max(100, height - top - bottom)
+
+        canvas.create_rectangle(
+            left, top, left + plot_w, top + plot_h,
+            outline=BORDER, fill="#052A43"
+        )
+
+        if not points:
+            canvas.create_text(
+                width / 2, height / 2,
+                text="No inventory history is available for this period.",
+                fill=MUTED, font=("Segoe UI", 12)
+            )
+            return
+
+        values = [value for _day, value in points]
+        threshold_values = [
+            float(item["low_threshold"] or 0),
+            float(item["min_threshold"] or 0),
+        ]
+        y_max = max(values + threshold_values + [1.0])
+        y_max = max(1.0, math.ceil(y_max * 1.12))
+        y_min = 0.0
+
+        # Grid and Y labels.
+        for index in range(6):
+            ratio = index / 5
+            y = top + plot_h - ratio * plot_h
+            value = y_min + ratio * (y_max - y_min)
+            canvas.create_line(
+                left, y, left + plot_w, y,
+                fill="#174E70", dash=(2, 4)
+            )
+            canvas.create_text(
+                left - 10, y,
+                text=f"{value:.0f}",
+                fill=MUTED,
+                anchor="e",
+                font=("Segoe UI", 9)
+            )
+
+        def y_for(value):
+            return top + plot_h - ((value - y_min) / (y_max - y_min)) * plot_h
+
+        # Threshold reference lines.
+        threshold_lines = [
+            (float(item["low_threshold"] or 0), YELLOW, "LOW"),
+            (float(item["min_threshold"] or 0), RED, "RE-ORDER"),
+        ]
+        for value, color, label in threshold_lines:
+            if value <= 0 or value > y_max:
+                continue
+            y = y_for(value)
+            canvas.create_line(
+                left, y, left + plot_w, y,
+                fill=color, dash=(7, 4), width=1
+            )
+            canvas.create_text(
+                left + plot_w - 4, y - 9,
+                text=f"{label}: {value:g}",
+                fill=color, anchor="e",
+                font=("Segoe UI", 8, "bold")
+            )
+
+        count = len(points)
+        xy = []
+        for index, (_day, value) in enumerate(points):
+            x = left if count == 1 else left + (index / (count - 1)) * plot_w
+            y = y_for(value)
+            xy.extend((x, y))
+
+        if len(xy) >= 4:
+            canvas.create_line(*xy, fill=CYAN, width=3, smooth=True)
+        elif len(xy) == 2:
+            x, y = xy
+            canvas.create_oval(x - 4, y - 4, x + 4, y + 4, fill=CYAN, outline=CYAN)
+
+        # Selected points and date labels.
+        label_indexes = sorted(set([
+            0,
+            max(0, (count - 1) // 4),
+            max(0, (count - 1) // 2),
+            max(0, (count - 1) * 3 // 4),
+            count - 1,
+        ]))
+        for index in label_indexes:
+            day, value = points[index]
+            x = left if count == 1 else left + (index / (count - 1)) * plot_w
+            y = y_for(value)
+            canvas.create_oval(
+                x - 3, y - 3, x + 3, y + 3,
+                fill=TEXT, outline=CYAN
+            )
+            canvas.create_text(
+                x, top + plot_h + 18,
+                text=day.strftime("%m/%d/%y"),
+                fill=MUTED, anchor="n",
+                font=("Segoe UI", 8)
+            )
+
+        first_day, first_value = points[0]
+        last_day, last_value = points[-1]
+        canvas.create_text(
+            left, 14,
+            text=f"{item['item_name']} - inventory units over time",
+            fill=TEXT, anchor="w",
+            font=("Segoe UI", 12, "bold")
+        )
+        canvas.create_text(
+            left + plot_w, 14,
+            text=f"{first_value:.1f} → {last_value:.1f} units",
+            fill=CYAN, anchor="e",
+            font=("Segoe UI", 10, "bold")
+        )
+        canvas.create_text(
+            20, top + plot_h / 2,
+            text="Units",
+            fill=MUTED,
+            angle=90,
+            font=("Segoe UI", 9, "bold")
+        )
+
+    def show_inventory_history(self):
+        self.clear_content()
+        tk.Label(
+            self.content,
+            text="Inventory History",
+            bg=BLUE_BG,
+            fg=CYAN,
+            font=("Segoe UI", 17, "bold"),
+        ).pack(anchor="w", padx=16, pady=12)
+
+        controls_panel, controls = self.make_panel(
+            self.content, "History Selection"
+        )
+        controls_panel.pack(fill="x", padx=16, pady=(0, 12))
+
+        item_var = tk.StringVar()
+        period_var = tk.StringVar(value="1 month")
+        labels = []
+        item_map = {}
+        for item in self.db.items():
+            label = f"{self.group_display_name(item['group_name'])} — {item['item_name']}"
+            labels.append(label)
+            item_map[label] = item["id"]
+
+        tk.Label(
+            controls, text="Inventory Item",
+            bg=BLUE_PANEL, fg=TEXT,
+            font=("Segoe UI", 10, "bold")
+        ).grid(row=0, column=0, sticky="w", padx=8, pady=8)
+        item_combo = ttk.Combobox(
+            controls, textvariable=item_var,
+            values=labels, state="readonly", width=56
+        )
+        item_combo.grid(row=0, column=1, sticky="ew", padx=8, pady=8)
+
+        tk.Label(
+            controls, text="Time Period",
+            bg=BLUE_PANEL, fg=TEXT,
+            font=("Segoe UI", 10, "bold")
+        ).grid(row=0, column=2, sticky="w", padx=8, pady=8)
+        period_combo = ttk.Combobox(
+            controls,
+            textvariable=period_var,
+            values=["1 week", "1 month", "3 months", "6 months", "1 year", "All time"],
+            state="readonly",
+            width=14,
+        )
+        period_combo.grid(row=0, column=3, sticky="w", padx=8, pady=8)
+        controls.columnconfigure(1, weight=1)
+
+        chart_panel, chart_body = self.make_panel(
+            self.content, "Calculated Inventory Level"
+        )
+        chart_panel.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+
+        summary_label = tk.Label(
+            chart_body, text="",
+            bg=BLUE_PANEL, fg=MUTED,
+            font=("Segoe UI", 10, "bold"),
+            anchor="w"
+        )
+        summary_label.pack(fill="x", pady=(0, 6))
+
+        canvas = tk.Canvas(
+            chart_body,
+            bg="#052A43",
+            highlightbackground=BORDER,
+            highlightthickness=1,
+        )
+        canvas.pack(fill="both", expand=True)
+
+        chart_state = {"item": None, "points": []}
+
+        def refresh_chart(*_args):
+            item_id = item_map.get(item_var.get())
+            if item_id is None:
+                canvas.delete("all")
+                canvas.create_text(
+                    360, 170,
+                    text="Select an inventory item.",
+                    fill=MUTED,
+                    font=("Segoe UI", 12)
+                )
+                return
+
+            item = self.db.item_by_id(item_id)
+            end_date = date.today()
+            period_days = {
+                "1 week": 7,
+                "1 month": 30,
+                "3 months": 90,
+                "6 months": 183,
+                "1 year": 365,
+            }
+            if period_var.get() == "All time":
+                start_date = parse_date(
+                    item["baseline_date"]
+                    or self.db.get_setting("created_date", iso_today())
+                )
+            else:
+                start_date = end_date - timedelta(
+                    days=period_days.get(period_var.get(), 30)
+                )
+
+            points = self.db.inventory_history(
+                item_id, start_date, end_date
+            )
+            chart_state["item"] = item
+            chart_state["points"] = points
+
+            if points:
+                values = [value for _day, value in points]
+                summary_label.config(
+                    text=(
+                        f"Period: {points[0][0].strftime('%m/%d/%Y')} - "
+                        f"{points[-1][0].strftime('%m/%d/%Y')}     "
+                        f"Start: {values[0]:.1f}     "
+                        f"Current: {values[-1]:.1f}     "
+                        f"Minimum: {min(values):.1f}     "
+                        f"Maximum: {max(values):.1f}"
+                    )
+                )
+            else:
+                summary_label.config(text="No history is available for this selection.")
+
+            self.draw_inventory_history_chart(canvas, item, points)
+
+        self.button(
+            controls, "Refresh Graphic", refresh_chart
+        ).grid(row=0, column=4, sticky="e", padx=8, pady=8)
+
+        item_combo.bind("<<ComboboxSelected>>", refresh_chart)
+        period_combo.bind("<<ComboboxSelected>>", refresh_chart)
+        canvas.bind(
+            "<Configure>",
+            lambda event: self.draw_inventory_history_chart(
+                canvas,
+                chart_state["item"],
+                chart_state["points"],
+            ) if chart_state["item"] is not None else None
+        )
+
+        if labels:
+            item_combo.current(0)
+            self.after(50, refresh_chart)
+
     def show_received(self):
         self.clear_content()
         tk.Label(self.content, text="Add Received Inventory", bg=BLUE_BG, fg=CYAN, font=("Segoe UI", 16, "bold")).pack(anchor="w", padx=16, pady=12)
@@ -1285,48 +1869,257 @@ class HHDApp(tk.Tk):
 
     def show_log_session(self):
         self.clear_content()
-        tk.Label(self.content, text="Log Dialysis Session", bg=BLUE_BG, fg=CYAN, font=("Segoe UI", 16, "bold")).pack(anchor="w", padx=16, pady=12)
-        panel, body = self.make_panel(self.content, "Session Entry")
-        panel.pack(fill="x", padx=16, pady=(0, 14))
-        date_var = tk.StringVar(value=iso_today())
-        type_var = tk.StringVar(value="Regular Session")
-        equiv_var = tk.StringVar(value="1")
-        notes_var = tk.StringVar()
-        for idx, (lab, var) in enumerate([("Session Date YYYY-MM-DD", date_var), ("Session Type", type_var), ("Session Equivalent", equiv_var), ("Notes", notes_var)]):
-            tk.Label(body, text=lab, bg=BLUE_PANEL, fg=TEXT).grid(row=idx, column=0, sticky="w", padx=10, pady=8)
-            if idx == 1:
-                e = ttk.Combobox(body, textvariable=var, values=["Regular Session", "Extra Session", "Missed Session", "Incomplete Session"], width=30, state="readonly")
-            else:
-                e = tk.Entry(body, textvariable=var, bg=INPUT_BG, fg=TEXT, insertbackground=TEXT, relief="solid", bd=1, width=34)
-            e.grid(row=idx, column=1, sticky="w", padx=10, pady=8)
-        tk.Label(body, text="Equivalent: Regular/Extra = 1, Missed = 0, Incomplete = 0.5 or any decimal.",
-                 bg=BLUE_PANEL, fg=MUTED).grid(row=4, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 8))
-        def adjust(*_):
-            if type_var.get() == "Missed Session": equiv_var.set("0")
-            elif type_var.get() == "Incomplete Session": equiv_var.set("0.5")
-            else: equiv_var.set("1")
-        type_var.trace_add("write", adjust)
+        tk.Label(
+            self.content,
+            text="Submit Treatment",
+            bg=BLUE_BG,
+            fg=CYAN,
+            font=("Segoe UI", 17, "bold"),
+        ).pack(anchor="w", padx=16, pady=12)
 
-        def save_session():
+        panel, body = self.make_panel(self.content, "Treatment Entry")
+        panel.pack(fill="x", padx=16, pady=(0, 12))
+
+        date_var = tk.StringVar(value=iso_today())
+        type_var = tk.StringVar(value="Regular Treatment")
+        equiv_var = tk.StringVar(value="1")
+
+        entry_rows = [
+            ("Treatment Date YYYY-MM-DD", date_var, "entry"),
+            ("Treatment Type", type_var, "combo"),
+            ("Treatment Equivalent", equiv_var, "entry"),
+        ]
+        for index, (label_text, variable, control_type) in enumerate(entry_rows):
+            tk.Label(
+                body,
+                text=label_text,
+                bg=BLUE_PANEL,
+                fg=TEXT,
+                font=("Segoe UI", 10),
+            ).grid(row=index, column=0, sticky="nw", padx=10, pady=7)
+            if control_type == "combo":
+                control = ttk.Combobox(
+                    body,
+                    textvariable=variable,
+                    values=[
+                        "Regular Treatment",
+                        "Extra Treatment",
+                        "Missed Treatment",
+                        "Incomplete Treatment",
+                    ],
+                    width=30,
+                    state="readonly",
+                )
+            else:
+                control = tk.Entry(
+                    body,
+                    textvariable=variable,
+                    bg=INPUT_BG,
+                    fg=TEXT,
+                    insertbackground=TEXT,
+                    relief="solid",
+                    bd=1,
+                    width=34,
+                )
+            control.grid(row=index, column=1, sticky="w", padx=10, pady=7)
+
+        tk.Label(
+            body,
+            text="Treatment Notes:",
+            bg=BLUE_PANEL,
+            fg=TEXT,
+            font=("Segoe UI", 10, "bold"),
+        ).grid(row=3, column=0, sticky="nw", padx=10, pady=7)
+
+        treatment_notes = tk.Text(
+            body,
+            height=4,
+            width=72,
+            wrap="word",
+            bg=INPUT_BG,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief="solid",
+            bd=1,
+            font=("Segoe UI", 10),
+        )
+        treatment_notes.grid(row=3, column=1, sticky="ew", padx=10, pady=7)
+        body.columnconfigure(1, weight=1)
+
+        tk.Label(
+            body,
+            text="Equivalent: Regular/Extra = 1, Missed = 0, Incomplete = 0.5 or another decimal.",
+            bg=BLUE_PANEL,
+            fg=MUTED,
+            font=("Segoe UI", 9),
+        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 8))
+
+        def adjust_equivalent(*_args):
+            if type_var.get() == "Missed Treatment":
+                equiv_var.set("0")
+            elif type_var.get() == "Incomplete Treatment":
+                equiv_var.set("0.5")
+            else:
+                equiv_var.set("1")
+
+        type_var.trace_add("write", adjust_equivalent)
+
+        def save_treatment():
             try:
-                eq = float(equiv_var.get())
-                if eq < 0: raise ValueError("Session equivalent cannot be negative.")
-                self.db.add_session(parse_date(date_var.get()).isoformat(), type_var.get(), eq, notes_var.get())
+                equivalent = float(equiv_var.get())
+                if equivalent < 0:
+                    raise ValueError("Treatment equivalent cannot be negative.")
+                notes = treatment_notes.get("1.0", "end-1c").strip()
+                self.db.add_session(
+                    parse_date(date_var.get()).isoformat(),
+                    type_var.get(),
+                    equivalent,
+                    notes,
+                )
                 self.db.backup_database("change")
-                notes_var.set("")
+                treatment_notes.delete("1.0", "end")
                 self.show_log_session()
             except Exception as ex:
-                messagebox.showerror(APP_NAME, f"Could not save session:\n{ex}")
-        self.button(body, "Save Session", save_session).grid(row=5, column=1, sticky="w", padx=10, pady=14)
+                messagebox.showerror(
+                    APP_NAME,
+                    f"Could not save treatment:\n{ex}",
+                )
 
-        p2, b2 = self.make_panel(self.content, "Recent Sessions")
-        p2.pack(fill="both", expand=True, padx=16, pady=(0, 16))
-        tree = ttk.Treeview(b2, columns=("date","type","equiv","notes"), show="headings")
-        for c, h, w in [("date","Date",120),("type","Type",180),("equiv","Equivalent",100),("notes","Notes",500)]:
-            tree.heading(c, text=h); tree.column(c, width=w, anchor="w")
-        tree.pack(fill="both", expand=True)
-        for r in self.db.recent_sessions(50):
-            tree.insert("", "end", values=(r["session_date"], r["session_type"], r["session_equivalent"], r["notes"] or ""))
+        self.button(
+            body, "Submit Treatment", save_treatment
+        ).grid(row=5, column=1, sticky="w", padx=10, pady=12)
+
+        history_panel, history_body = self.make_panel(
+            self.content, "Treatment History"
+        )
+        history_panel.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+
+        tree_frame = tk.Frame(history_body, bg=BLUE_PANEL)
+        tree_frame.pack(fill="both", expand=True)
+
+        self.style.configure(
+            "TreatmentHistory.Treeview",
+            background=BLUE_PANEL,
+            foreground=TEXT,
+            fieldbackground=BLUE_PANEL,
+            rowheight=36,
+            font=("Segoe UI", 12),
+        )
+        self.style.configure(
+            "TreatmentHistory.Treeview.Heading",
+            background=BLUE_HEADER,
+            foreground=TEXT,
+            font=("Segoe UI", 12, "bold"),
+        )
+        self.style.map(
+            "TreatmentHistory.Treeview",
+            background=[("selected", "#126A9F")],
+            foreground=[("selected", "white")],
+        )
+
+        treatment_tree = ttk.Treeview(
+            tree_frame,
+            columns=("date", "type"),
+            show="headings",
+            height=8,
+            style="TreatmentHistory.Treeview",
+        )
+        for column, heading, width in [
+            ("date", "Date", 160),
+            ("type", "Treatment Type", 360),
+        ]:
+            treatment_tree.heading(column, text=heading)
+            treatment_tree.column(
+                column,
+                width=width,
+                stretch=True,
+                anchor="w",
+            )
+        treatment_tree.pack(fill="both", expand=True)
+
+        notes_header = tk.Frame(history_body, bg=BLUE_PANEL)
+        notes_header.pack(fill="x", pady=(10, 5))
+        tk.Label(
+            notes_header,
+            text="Treatment Notes:",
+            bg=BLUE_PANEL,
+            fg=CYAN,
+            font=("Segoe UI", 13, "bold"),
+        ).pack(side="left")
+
+        selected_session_id = {"value": None}
+
+        notes_reader = tk.Text(
+            history_body,
+            height=6,
+            wrap="word",
+            bg="#052A43",
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief="solid",
+            bd=1,
+            font=("Segoe UI", 12),
+            state="disabled",
+        )
+        notes_reader.pack(fill="x")
+
+        edit_button = self.button(notes_header, "Edit", lambda: None)
+        save_button = self.button(notes_header, "Save Notes", lambda: None)
+        save_button.config(state="disabled")
+        save_button.pack(side="right", padx=(6, 0))
+        edit_button.pack(side="right")
+
+        def show_selected_notes(_event=None):
+            selection = treatment_tree.selection()
+            if not selection:
+                selected_session_id["value"] = None
+                text = ""
+            else:
+                selected_session_id["value"] = int(selection[0])
+                record = self.db.session_by_id(selected_session_id["value"])
+                text = (record["notes"] or "") if record else ""
+
+            notes_reader.config(state="normal")
+            notes_reader.delete("1.0", "end")
+            notes_reader.insert("1.0", text)
+            notes_reader.config(state="disabled")
+            edit_button.config(state="normal" if selection else "disabled")
+            save_button.config(state="disabled")
+
+        def edit_selected_notes():
+            if selected_session_id["value"] is None:
+                return
+            notes_reader.config(state="normal")
+            notes_reader.focus_set()
+            save_button.config(state="normal")
+            edit_button.config(state="disabled")
+
+        def save_selected_notes():
+            session_id = selected_session_id["value"]
+            if session_id is None:
+                return
+            notes = notes_reader.get("1.0", "end-1c").strip()
+            self.db.update_session_notes(session_id, notes)
+            self.db.backup_database("change")
+            notes_reader.config(state="disabled")
+            save_button.config(state="disabled")
+            edit_button.config(state="normal")
+
+        edit_button.config(command=edit_selected_notes, state="disabled")
+        save_button.config(command=save_selected_notes)
+
+        treatment_tree.bind("<<TreeviewSelect>>", show_selected_notes)
+
+        for record in self.db.recent_sessions(100):
+            treatment_tree.insert(
+                "",
+                "end",
+                iid=str(record["id"]),
+                values=(
+                    record["session_date"],
+                    record["session_type"],
+                ),
+            )
 
     def show_settings(self):
         self.clear_content()
