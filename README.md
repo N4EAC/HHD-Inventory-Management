@@ -106,10 +106,39 @@ dist\HHD_Inventory_Manager
 Open the included Inno Setup script:
 
 ```text
-HHD_Inventory_Manager_Setup_ProgramFiles_v1.0.10.iss
+HHD_Inventory_Manager_Setup_ProgramFiles_v1.1.0.iss
 ```
 
 Compile it with Inno Setup to create the Windows installer.
+
+## Recent Changes
+
+Included changes:
+
+Tables now automatically adjust row height and column width based on:
+Selected font size
+Heading text
+Cell contents
+Available panel width
+Flexible columns such as Item and Notes receive additional space while keeping panels intact.
+Added theme selection under Settings:
+Medical Blue
+Beige
+Dark
+Theme choice is saved and restored at startup.
+Menus, inputs, tables, title bar, panels, charts, and text use appropriate contrast for each theme.
+Added Export Database directly beside Import Database in the left menu.
+Renamed the large sidebar button from Submit Treatment to Treatments.
+Added a Treatment Calendar page with:
+Month view
+Week view
+Previous, Today, and Next navigation
+Green days for completed treatments
+Yellow days for incomplete treatments
+Red days for missed treatments
+Normal background for days without a treatment record
+Updated PDF user manual included.
+Updated Inno Setup installer scripts included.
 
 ## Important Safety Note
 
