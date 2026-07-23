@@ -1,8 +1,8 @@
-HHD Inventory Manager 1.1.0 GitHub Package
+HHD Inventory Manager 1.1.3 GitHub Package
 
 .gitignore
 HHD_Inventory_Manager_Setup.iss
-HHD_Inventory_Manager_Setup_ProgramFiles_v1.1.0.iss
+HHD_Inventory_Manager_Setup_ProgramFiles_v1.1.3.iss
 HHD_Inventory_Manager_User_Manual.pdf
 PACKAGE_CONTENTS.txt
 README.md

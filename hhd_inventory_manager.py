@@ -25,7 +25,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
 APP_NAME = "HHD Inventory Manager"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.3"
 DB_NAME = "hhd_inventory.db"
 SETTINGS_FILE = "hhd_inventory_settings.json"
 APP_FOLDER_NAME = "HHD Inventory Manager"
@@ -288,12 +288,27 @@ def iso_today():
 def parse_date(value, fallback=None):
     if not value:
         return fallback or date.today()
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
     for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y"):
         try:
             return datetime.strptime(value.strip(), fmt).date()
         except Exception:
             pass
     return fallback or date.today()
+
+def round_half_unit(value):
+    """Inventory quantities are represented only as whole or half units."""
+    return round(float(value) * 2.0) / 2.0
+
+def validate_half_unit(value, field_name="Value"):
+    number = float(value)
+    normalized = round_half_unit(number)
+    if abs(number - normalized) > 1e-8:
+        raise ValueError(f"{field_name} must be a whole number or end in .5.")
+    return normalized
 
 class InventoryDB:
     def __init__(self):
@@ -334,6 +349,7 @@ class InventoryDB:
             lifespan_days INTEGER NOT NULL DEFAULT 0,
             auto_session_usage INTEGER NOT NULL DEFAULT 1,
             full_attempt_usage INTEGER NOT NULL DEFAULT 0,
+            allow_half_removal INTEGER NOT NULL DEFAULT 0,
             active INTEGER NOT NULL DEFAULT 1,
             UNIQUE(group_name, item_name)
         );
@@ -374,6 +390,10 @@ class InventoryDB:
         if "full_attempt_usage" not in item_columns:
             c.execute(
                 "ALTER TABLE items ADD COLUMN full_attempt_usage INTEGER NOT NULL DEFAULT 0"
+            )
+        if "allow_half_removal" not in item_columns:
+            c.execute(
+                "ALTER TABLE items ADD COLUMN allow_half_removal INTEGER NOT NULL DEFAULT 0"
             )
 
         defaults = {
@@ -425,7 +445,8 @@ class InventoryDB:
     def add_item(self, group_name, item_name, baseline_units=0, baseline_date=None,
                  min_threshold=0, low_threshold=0, units_per_session=0,
                  units_per_week=0, reusable_sessions=1, lifespan_days=0,
-                 auto_session_usage=1, full_attempt_usage=0):
+                 auto_session_usage=1, full_attempt_usage=0,
+                 allow_half_removal=0):
         item_name = item_name.strip()
         if not item_name:
             raise ValueError("Item name cannot be blank.")
@@ -436,14 +457,15 @@ class InventoryDB:
             INSERT INTO items(
                 group_name,item_name,baseline_units,baseline_date,min_threshold,low_threshold,
                 units_per_session,units_per_week,reusable_sessions,lifespan_days,
-                auto_session_usage,full_attempt_usage,active
+                auto_session_usage,full_attempt_usage,allow_half_removal,active
             )
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1)
         """, (
             group_name, item_name, float(baseline_units), baseline_date,
             float(min_threshold), float(low_threshold), float(units_per_session),
             float(units_per_week), max(float(reusable_sessions), 1.0),
-            int(lifespan_days), int(auto_session_usage), int(full_attempt_usage)
+            int(lifespan_days), int(auto_session_usage), int(full_attempt_usage),
+            int(allow_half_removal)
         ))
         self.conn.commit()
 
@@ -451,7 +473,8 @@ class InventoryDB:
         allowed = {
             "group_name", "item_name", "baseline_units", "baseline_date", "min_threshold",
             "low_threshold", "units_per_session", "units_per_week", "reusable_sessions",
-            "lifespan_days", "auto_session_usage", "full_attempt_usage", "active"
+            "lifespan_days", "auto_session_usage", "full_attempt_usage",
+            "allow_half_removal", "active"
         }
         parts, values = [], []
         for k, v in kwargs.items():
@@ -473,6 +496,87 @@ class InventoryDB:
             (item_id, received_date, units, notes)
         )
         self.conn.commit()
+
+    def add_correction(self, item_id, correction_date, units_delta, notes=""):
+        delta = validate_half_unit(units_delta, "Correction")
+        self.conn.execute(
+            """INSERT INTO corrections(item_id,correction_date,units_delta,notes)
+               VALUES(?,?,?,?)""",
+            (item_id, parse_date(correction_date).isoformat(), delta, notes),
+        )
+        self.conn.commit()
+
+    def remove_existing_half_unit(self, item_id, notes="Half-used item removed"):
+        """
+        Remove the existing .5 fraction from an item's calculated total.
+
+        The correction date is never earlier than the item's baseline date, so
+        the correction cannot be excluded from the current-count calculation.
+        The result is verified before returning.
+        """
+        item = self.item_by_id(item_id)
+        if not item:
+            raise ValueError("Inventory item was not found.")
+
+        before, *_ = self.current_count(item)
+        fractional = round(before - math.floor(before), 8)
+        if abs(fractional - 0.5) > 1e-8:
+            raise ValueError(
+                f"The current total is {before:g}. "
+                "This action is only available when the total ends in .5."
+            )
+
+        baseline_date = parse_date(
+            item["baseline_date"]
+            or self.get_setting("created_date", iso_today())
+        )
+        effective_date = max(date.today(), baseline_date)
+
+        cursor = self.conn.execute(
+            """INSERT INTO corrections(item_id,correction_date,units_delta,notes)
+               VALUES(?,?,?,?)""",
+            (item_id, effective_date.isoformat(), -0.5, notes),
+        )
+        correction_id = cursor.lastrowid
+        self.conn.commit()
+
+        refreshed = self.item_by_id(item_id)
+        after, *_ = self.current_count(refreshed)
+        target = round_half_unit(before - 0.5)
+
+        if abs(after - target) > 1e-8:
+            # Undo the ineffective correction and adjust the baseline by exactly
+            # the amount needed. This fallback guarantees the visible total.
+            self.conn.execute(
+                "DELETE FROM corrections WHERE id=?",
+                (correction_id,),
+            )
+            baseline_units = float(refreshed["baseline_units"])
+            adjustment = target - before
+            self.conn.execute(
+                "UPDATE items SET baseline_units=? WHERE id=?",
+                (round_half_unit(baseline_units + adjustment), item_id),
+            )
+            self.conn.execute(
+                """INSERT INTO corrections(item_id,correction_date,units_delta,notes)
+                   VALUES(?,?,?,?)""",
+                (
+                    item_id,
+                    effective_date.isoformat(),
+                    0.0,
+                    notes + " (applied through baseline adjustment)",
+                ),
+            )
+            self.conn.commit()
+            after, *_ = self.current_count(self.item_by_id(item_id))
+
+        if abs(after - target) > 1e-8:
+            raise RuntimeError(
+                f"Half-unit removal failed verification: "
+                f"{before:g} remained {after:g}."
+            )
+
+        return before, after
 
     def add_session(self, session_date, session_type, session_equivalent, notes=""):
         self.conn.execute(
@@ -589,7 +693,7 @@ class InventoryDB:
             - session_usage
             - weekly_usage
         )
-        return max(0.0, current)
+        return max(0.0, round_half_unit(current))
 
     def inventory_history(self, item_id, start_date, end_date, max_points=180):
         item = self.item_by_id(item_id)
@@ -635,7 +739,10 @@ class InventoryDB:
 
         weekly_usage = self.weeks_since(since) * float(item["units_per_week"])
         used = session_usage + weekly_usage
-        current = baseline + received + corrections - used
+        current = round_half_unit(
+            baseline + received + corrections - used
+        )
+        used = round_half_unit(used)
         return max(0.0, current), used, received, corrections, sessions
 
     def status(self, item, current):
@@ -1678,6 +1785,7 @@ class HHDApp(tk.Tk):
         p.pack(fill="both", expand=True, padx=16, pady=(0, 16))
         self.current_tree = self.inventory_tree(b, group, compact=False)
 
+
     def edit_selected_item(self):
         if not hasattr(self, "current_tree"):
             return
@@ -1711,7 +1819,7 @@ class HHDApp(tk.Tk):
         win = tk.Toplevel(self)
         win.configure(bg=BLUE_BG)
         win.title("Item Settings")
-        self.center_child_window(win, 620, 735)
+        self.center_child_window(win, 660, 820)
         win.transient(self)
         win.grab_set()
 
@@ -1777,6 +1885,50 @@ class HHDApp(tk.Tk):
             pady=(4, 8),
         )
 
+        remove_half_now_var = tk.IntVar(value=0)
+        remove_half_check = tk.Checkbutton(
+            form,
+            text="Remove the existing .5 fraction from total when saving",
+            variable=remove_half_now_var,
+            bg=BLUE_PANEL,
+            fg=TEXT,
+            activebackground=BLUE_PANEL,
+            activeforeground=TEXT,
+            selectcolor=INPUT_BG,
+            font=("Segoe UI", 10, "bold"),
+        )
+        remove_half_check.grid(
+            row=len(rows)+2,
+            column=0,
+            columnspan=2,
+            sticky="w",
+            padx=14,
+            pady=(4, 2),
+        )
+
+        tk.Label(
+            form,
+            text=(
+                "One-time action. Example: 23.5 becomes 23.0. "
+                "It only runs when the calculated total currently ends in .5."
+            ),
+            bg=BLUE_PANEL,
+            fg=MUTED,
+            wraplength=520,
+            justify="left",
+            font=("Segoe UI", 9),
+        ).grid(
+            row=len(rows)+3,
+            column=0,
+            columnspan=2,
+            sticky="w",
+            padx=32,
+            pady=(0, 8),
+        )
+
+        if is_new:
+            remove_half_check.config(state="disabled")
+
         sessions_per_week = self.db.get_setting("sessions_per_week", "4")
         tk.Label(
             form,
@@ -1786,7 +1938,7 @@ class HHDApp(tk.Tk):
             wraplength=500,
             justify="left",
             font=("Segoe UI", 9)
-        ).grid(row=len(rows)+2, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 10))
+        ).grid(row=len(rows)+4, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 10))
 
         form.columnconfigure(1, weight=1)
 
@@ -1797,10 +1949,19 @@ class HHDApp(tk.Tk):
                 data = {
                     "group_name": group,
                     "item_name": item_name,
-                    "baseline_units": float(vars_["baseline_units"].get() or 0),
+                    "baseline_units": validate_half_unit(
+                        vars_["baseline_units"].get() or 0,
+                        "Current/Baseline Units",
+                    ),
                     "baseline_date": parse_date(vars_["baseline_date"].get()).isoformat(),
-                    "units_per_session": float(vars_["units_per_session"].get() or 0),
-                    "units_per_week": float(vars_["units_per_week"].get() or 0),
+                    "units_per_session": validate_half_unit(
+                        vars_["units_per_session"].get() or 0,
+                        "Units Used Per Session",
+                    ),
+                    "units_per_week": validate_half_unit(
+                        vars_["units_per_week"].get() or 0,
+                        "Additional Units Used Per Week",
+                    ),
                     "reusable_sessions": max(float(vars_["reusable_sessions"].get() or 1), 1.0),
                     "lifespan_days": int(float(vars_["lifespan_days"].get() or 0)),
                     "low_threshold": float(vars_["low_threshold"].get() or 0),
@@ -1815,6 +1976,17 @@ class HHDApp(tk.Tk):
                     self.db.add_item(**data)
                 else:
                     self.db.update_item(item["id"], **data)
+
+                    if int(remove_half_now_var.get()) == 1:
+                        before_units, after_units = self.db.remove_existing_half_unit(
+                            item["id"],
+                            "Half-used item removed from Item Settings",
+                        )
+                        if abs(after_units - (before_units - 0.5)) > 1e-8:
+                            raise RuntimeError(
+                                "The half-unit removal did not update the total."
+                            )
+                        self.db.backup_database("change")
 
                 self.save_local_settings()
                 win.destroy()
@@ -1860,7 +2032,9 @@ class HHDApp(tk.Tk):
         return getattr(self, "_item_dropdown_map", {}).get(value)
 
     def treatment_day_statuses(self, start_date, end_date):
-        statuses = {}
+        days = {}
+        priority = {"performed": 1, "incomplete": 2, "missed": 3}
+
         for record in self.db.sessions_between(start_date, end_date):
             day = parse_date(record["session_date"])
             treatment_type = (record["session_type"] or "").lower()
@@ -1871,12 +2045,15 @@ class HHDApp(tk.Tk):
             else:
                 status = "performed"
 
-            # Priority when more than one record exists on a date:
-            # missed > incomplete > performed.
-            priority = {"performed": 1, "incomplete": 2, "missed": 3}
-            if priority[status] >= priority.get(statuses.get(day, ""), 0):
-                statuses[day] = status
-        return statuses
+            entry = days.setdefault(day, {"status": status, "notes": []})
+            if priority[status] >= priority[entry["status"]]:
+                entry["status"] = status
+
+            note = (record["notes"] or "").strip()
+            if note and note not in entry["notes"]:
+                entry["notes"].append(note)
+
+        return days
 
     def show_treatment_calendar(self):
         self.clear_content()
@@ -1945,7 +2122,9 @@ class HHDApp(tk.Tk):
                 child.destroy()
 
         def display_cell(parent, row, column, day_value, current_month=True):
-            status = state.get("statuses", {}).get(day_value)
+            day_entry = state.get("statuses", {}).get(day_value, {})
+            status = day_entry.get("status")
+            notes = day_entry.get("notes", [])
             bg = CALENDAR_EMPTY
             fg = TEXT if current_month else MUTED
             detail = ""
@@ -1983,10 +2162,23 @@ class HHDApp(tk.Tk):
                     text=detail,
                     bg=bg,
                     fg=fg,
-                    wraplength=130,
+                    wraplength=150,
                     justify="left",
                     font=("Segoe UI", 9, "bold"),
-                ).pack(anchor="w", padx=8, pady=(2, 7))
+                ).pack(anchor="w", padx=8, pady=(2, 3))
+
+            if notes:
+                notes_text = "\n".join(notes)
+                tk.Label(
+                    cell,
+                    text=notes_text,
+                    bg=bg,
+                    fg=fg,
+                    wraplength=150,
+                    justify="left",
+                    anchor="nw",
+                    font=("Segoe UI", 8),
+                ).pack(fill="both", expand=True, anchor="w", padx=8, pady=(0, 7))
 
         def render_calendar(*_args):
             clear_calendar()
@@ -2447,7 +2639,7 @@ class HHDApp(tk.Tk):
                 messagebox.showerror(APP_NAME, "Select an item.")
                 return
             try:
-                units = float(units_var.get())
+                units = validate_half_unit(units_var.get(), "Units received")
                 if units <= 0:
                     raise ValueError("Units received must be greater than zero.")
                 self.db.add_received(item_id, parse_date(date_var.get()).isoformat(), units, notes_var.get())

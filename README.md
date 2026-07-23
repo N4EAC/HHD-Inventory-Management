@@ -1,5 +1,4 @@
 # HHD Inventory Manager
-<img width="5712" height="4284" alt="IMG_0819 (002)" src="https://github.com/user-attachments/assets/224f445b-869e-43c5-bb43-db2c9d83df6d" />
 
 HHD Inventory Manager is a Windows desktop application for tracking Home Hemodialysis inventory.
 
@@ -11,9 +10,9 @@ The program helps a home hemodialysis caregiver or patient maintain a clear, loc
 
 ## Main Features
 
-- Tracks two supply groups:
-  - NxStage Supplies (configurable group name)
-  - DaVita Supplies (configurable group name)
+- Tracks two supply groups with editable display names.
+  - Default: NxStage Supplies
+  - Default: DaVita Supplies
 - Configurable patient name.
 - Configurable dialysis schedule.
 - Per-item settings:
@@ -32,13 +31,51 @@ The program helps a home hemodialysis caregiver or patient maintain a clear, loc
 - Record received inventory with date and notes.
 - Log regular, extra, missed, and incomplete dialysis sessions.
 - Calculates current inventory from baseline inventory, received inventory, logged sessions, and configured usage rules.
-- Dashboard with current units, estimated weeks remaining, and reorder status.
+- Dashboard with current units, estimated weeks remaining, reorder status, and animated status LEDs.
+- Green LED for OK, flashing yellow LED for LOW, and flashing red LED for RE-ORDER.
+- Larger inventory and sidebar fonts for improved readability.
+- User-adjustable inventory font controls on the Dashboard and inventory group screens.
+- Inventory font adjustment is limited to five points below or above the default size.
+- Alert column uses animated status LEDs; Status labels are shown in bold text.
 - Local SQLite database storage.
 - Automatic database backup every 10 minutes.
 - Database import function for moving the program to another computer.
 - CSV export.
 - Remembers window size, position, and maximized state.
 - Includes a PDF user manual.
+
+
+- Prominent Submit Treatment button positioned separately at the bottom of the sidebar.
+- Treatment Notes field stored with each treatment record.
+- Treatment history notes reading panel with controlled Edit and Save Notes actions.
+- Inventory History graph with selectable periods: 1 week, 1 month, 3 months, 6 months, 1 year, or all time.
+
+- SAK attempted-treatment accounting: regular, extra, and incomplete treatments each consume one reusable-session slot; missed treatments consume none.
+- Per-item option to count incomplete treatments as a full item use.
+
+- Responsive, equal-width NxStage and DaVita dashboard panels at normal and maximized window sizes.
+- Treatment history hides the internal Equivalent value to avoid end-user confusion.
+
+- Dark medical-blue themed About dialog matching the main application.
+- Larger Treatment History table, headings, and treatment notes fonts.
+
+- Corrected selected Inventory History period dates so the requested range is always displayed, even when available item data begins later.
+
+- Inventory History X-axis now always spans the selected period.
+- Dates before an item's baseline are visibly marked as unavailable instead of being plotted as calculated history.
+
+
+- Responsive tables automatically adjust row heights and column widths to the selected font size and available panel width.
+- Theme selection in Settings: Medical Blue, Beige, and Dark.
+- Database export action located beside database import in the left menu.
+- Treatments button replaces the former Submit Treatment label.
+- Treatment Calendar with Month and Week views; performed treatments are green, missed treatments red, and incomplete treatments yellow.
+
+
+- Inventory quantities are normalized to whole or half units only; values such as .4 or .8 are not displayed.
+- One-time option removes the existing .5 fraction from the calculated total; unchecked by default.
+- Saving verifies the result before closing; for example, 23.5 must become 23.0.
+- Treatment notes are displayed inside the corresponding Treatment Calendar day.
 
 ## Data Storage
 
@@ -106,39 +143,10 @@ dist\HHD_Inventory_Manager
 Open the included Inno Setup script:
 
 ```text
-HHD_Inventory_Manager_Setup_ProgramFiles_v1.1.0.iss
+HHD_Inventory_Manager_Setup_ProgramFiles_v1.1.3.iss
 ```
 
 Compile it with Inno Setup to create the Windows installer.
-
-## Recent Changes
-
-Included changes:
-
-Tables now automatically adjust row height and column width based on:
-Selected font size
-Heading text
-Cell contents
-Available panel width
-Flexible columns such as Item and Notes receive additional space while keeping panels intact.
-Added theme selection under Settings:
-Medical Blue
-Beige
-Dark
-Theme choice is saved and restored at startup.
-Menus, inputs, tables, title bar, panels, charts, and text use appropriate contrast for each theme.
-Added Export Database directly beside Import Database in the left menu.
-Renamed the large sidebar button from Submit Treatment to Treatments.
-Added a Treatment Calendar page with:
-Month view
-Week view
-Previous, Today, and Next navigation
-Green days for completed treatments
-Yellow days for incomplete treatments
-Red days for missed treatments
-Normal background for days without a treatment record
-Updated PDF user manual included.
-Updated Inno Setup installer scripts included.
 
 ## Important Safety Note
 
