@@ -172,12 +172,6 @@ Compile it with Inno Setup to create the Windows installer.
 
 This software is an inventory tracking tool only. It does not replace medical, DaVita, NxStage, physician, nurse, or clinical instructions. Always verify physical inventory before treatment.
 
-## Version 1.1.6
-
-- Added a unified kidney application icon for the EXE, taskbar, title bar, installer, shortcuts, and About window.
-- Added multi-resolution Windows icon sizes from 16×16 through 256×256.
-
-
-### v1.1.6 corrected icon
+# v1.1.6 corrected icon
 - Replaced the bean-shaped icon with the user-approved cyan kidney icon.
 - The same icon is used in the HHD menu, application window, taskbar, executable, installer, and shortcuts.
