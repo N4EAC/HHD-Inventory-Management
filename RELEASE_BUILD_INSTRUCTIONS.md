@@ -9,11 +9,11 @@ To create the Windows installer:
    Build complete.
    EXE folder: dist\HHD_Inventory_Manager
 
-4. Open `HHD_Inventory_Manager_Setup_ProgramFiles_v1.1.3.iss` in Inno Setup.
+4. Open `HHD_Inventory_Manager_Setup_ProgramFiles_v1.1.6.iss` in Inno Setup.
 5. Compile the script.
 6. The installer will be created in:
 
-   installer_output\HHD_Inventory_Manager_Setup_v1.1.3.exe
+   installer_output\HHD_Inventory_Manager_Setup_v1.1.6.exe
 
 The program installs to Program Files. User data is stored in:
 

@@ -18,6 +18,7 @@ import ctypes.wintypes
 import json
 import shutil
 import math
+import webbrowser
 import calendar
 import tkinter.font as tkfont
 from datetime import datetime, date, timedelta
@@ -25,7 +26,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
 APP_NAME = "HHD Inventory Manager"
-APP_VERSION = "1.1.3"
+APP_VERSION = "1.1.6"
 DB_NAME = "hhd_inventory.db"
 SETTINGS_FILE = "hhd_inventory_settings.json"
 APP_FOLDER_NAME = "HHD Inventory Manager"
@@ -101,7 +102,29 @@ THEMES = {
         "select": "#365D78",
         "calendar_empty": "#20262D",
         "dark_titlebar": True,
+    },    "Cyberpunk": {
+        "bg": "#090B14",
+        "panel": "#111526",
+        "panel2": "#171D33",
+        "header": "#291447",
+        "accent": "#00F5FF",
+        "text": "#F7F7FF",
+        "muted": "#A9B0D0",
+        "green": "#39FF88",
+        "yellow": "#FFE94A",
+        "red": "#FF3B7A",
+        "border": "#8A2BE2",
+        "input": "#0D1020",
+        "button": "#3B1763",
+        "button_hover": "#5A218F",
+        "panel_title": "#160D2A",
+        "status": "#07080F",
+        "chart": "#080B18",
+        "select": "#00A9B8",
+        "calendar_empty": "#12172A",
+        "dark_titlebar": True,
     },
+
 }
 
 def set_theme_palette(theme_name):
@@ -191,6 +214,12 @@ def icon_path():
 
 def icon_png_path():
     return os.path.join(app_dir(), "hhd_inventory_manager.png")
+
+def about_icon_png_path():
+    return os.path.join(app_dir(), "hhd_inventory_manager_about.png")
+
+def menu_icon_png_path():
+    return os.path.join(app_dir(), "hhd_menu_icon.png")
 
 def documents_dir():
     try:
@@ -1041,12 +1070,123 @@ class HHDApp(tk.Tk):
             self.datetime_label.config(text=datetime.now().strftime("%A, %B %d, %Y   %I:%M %p"))
         self.after(30000, self.schedule_clock_update)
 
+    def themed_dialog(
+        self,
+        title,
+        message,
+        buttons,
+        width=520,
+        height=250,
+    ):
+        """Display a modal dialog using the currently selected application theme."""
+        result = {"value": None}
+        win = tk.Toplevel(self)
+        win.title(title)
+        win.configure(bg=BLUE_BG)
+        win.resizable(False, False)
+        self.center_child_window(win, width, height)
+        win.transient(self)
+        win.grab_set()
+        request_windows_titlebar(
+            win.winfo_id(),
+            BLUE_BG,
+            TEXT,
+            BORDER,
+            self.theme_palette.get("dark_titlebar", True),
+        )
+
+        header = tk.Frame(win, bg=BLUE_HEADER)
+        header.pack(fill="x")
+        tk.Label(
+            header,
+            text=title,
+            bg=BLUE_HEADER,
+            fg=TEXT,
+            font=("Segoe UI", 14, "bold"),
+            anchor="w",
+            padx=18,
+            pady=12,
+        ).pack(fill="x")
+
+        body = tk.Frame(
+            win,
+            bg=BLUE_PANEL,
+            highlightbackground=BORDER,
+            highlightthickness=1,
+        )
+        body.pack(fill="both", expand=True, padx=16, pady=16)
+
+        tk.Label(
+            body,
+            text=message,
+            bg=BLUE_PANEL,
+            fg=TEXT,
+            wraplength=width - 70,
+            justify="left",
+            font=("Segoe UI", 10),
+        ).pack(fill="both", expand=True, anchor="w", padx=14, pady=14)
+
+        button_row = tk.Frame(body, bg=BLUE_PANEL)
+        button_row.pack(fill="x", padx=12, pady=(0, 12))
+
+        def choose(value):
+            result["value"] = value
+            win.destroy()
+
+        for label, value in reversed(buttons):
+            dialog_button = self.button(
+                button_row,
+                label,
+                lambda v=value: choose(v),
+            )
+            # Keep dialog actions readable at Windows display scaling levels.
+            dialog_button.configure(width=max(10, len(label) + 2))
+            dialog_button.pack(side="right", padx=(10, 0), pady=(4, 2))
+
+        win.protocol("WM_DELETE_WINDOW", lambda: choose(None))
+        win.bind("<Escape>", lambda _event: choose(None))
+        win.wait_window()
+        return result["value"]
+
+    def themed_confirm(self, title, message):
+        return self.themed_dialog(
+            title,
+            message,
+            [("Yes", True), ("No", False)],
+            width=540,
+            height=310,
+        ) is True
+
+    def themed_export_complete(self, filename, export_name):
+        choice = self.themed_dialog(
+            f"{export_name} Complete",
+            f"{export_name} was exported successfully:\n\n{filename}",
+            [("Open Folder", "open"), ("Close", "close")],
+            width=590,
+            height=270,
+        )
+        if choice == "open":
+            try:
+                folder = os.path.dirname(os.path.abspath(filename))
+                if os.name == "nt":
+                    os.startfile(folder)
+                else:
+                    webbrowser.open(f"file://{folder}")
+            except Exception as ex:
+                self.themed_dialog(
+                    APP_NAME,
+                    f"Could not open the export folder:\n{ex}",
+                    [("Close", None)],
+                    width=520,
+                    height=230,
+                )
+
     def show_about(self):
         win = tk.Toplevel(self)
         win.title(f"About {APP_NAME}")
         win.configure(bg=BLUE_BG)
         win.resizable(False, False)
-        self.center_child_window(win, 520, 390)
+        self.center_child_window(win, 560, 465)
         win.transient(self)
         win.grab_set()
 
@@ -1054,13 +1194,22 @@ class HHDApp(tk.Tk):
         header.pack(fill="x")
         header.pack_propagate(False)
 
-        tk.Label(
-            header,
-            text="HHDIM",
-            bg=BLUE_HEADER,
-            fg=CYAN,
-            font=("Segoe UI", 22, "bold"),
-        ).pack(side="left", padx=(22, 12), pady=16)
+        try:
+            self._about_icon_photo = tk.PhotoImage(file=about_icon_png_path())
+            tk.Label(
+                header,
+                image=self._about_icon_photo,
+                bg=BLUE_HEADER,
+                bd=0,
+            ).pack(side="left", padx=(18, 12), pady=12)
+        except Exception:
+            tk.Label(
+                header,
+                text="🫘",
+                bg=BLUE_HEADER,
+                fg=CYAN,
+                font=("Segoe UI Emoji", 24),
+            ).pack(side="left", padx=(22, 12), pady=14)
 
         title_area = tk.Frame(header, bg=BLUE_HEADER)
         title_area.pack(side="left", fill="both", expand=True, pady=12)
@@ -1119,9 +1268,25 @@ class HHDApp(tk.Tk):
             bg=BLUE_PANEL,
             fg=MUTED,
             justify="left",
-            wraplength=440,
+            wraplength=480,
             font=("Segoe UI", 10),
         ).pack(anchor="w", padx=18)
+
+        release_link = tk.Label(
+            body,
+            text="Open HHD Inventory Manager Releases",
+            bg=BLUE_PANEL,
+            fg=CYAN,
+            cursor="hand2",
+            font=("Segoe UI", 10, "underline"),
+        )
+        release_link.pack(anchor="w", padx=18, pady=(14, 0))
+        release_link.bind(
+            "<Button-1>",
+            lambda _event: webbrowser.open(
+                "https://github.com/N4EAC/HHD-Inventory-Management/releases"
+            ),
+        )
 
         self.button(body, "Close", win.destroy).pack(
             side="bottom", anchor="e", padx=18, pady=18
@@ -1159,12 +1324,15 @@ class HHDApp(tk.Tk):
         try:
             self.db.conn.commit()
             shutil.copy2(db_path(), filename)
-            messagebox.showinfo(
-                APP_NAME,
-                f"Database exported successfully:\n{filename}",
-            )
+            self.themed_export_complete(filename, "Database Export")
         except Exception as ex:
-            messagebox.showerror(APP_NAME, f"Database export failed:\n{ex}")
+            self.themed_dialog(
+                APP_NAME,
+                f"Database export failed:\n{ex}",
+                [("Close", None)],
+                width=540,
+                height=240,
+            )
 
     def remember_window_geometry_event(self, event=None):
         """Remember current window state during runtime without constantly writing to disk."""
@@ -1577,9 +1745,15 @@ class HHDApp(tk.Tk):
         menu = tk.Frame(self.sidebar, bg=BLUE_PANEL)
         menu.pack(side="top", fill="both", expand=True)
 
+        try:
+            self._hhd_menu_icon = tk.PhotoImage(file=menu_icon_png_path())
+        except Exception:
+            self._hhd_menu_icon = None
         tk.Label(
             menu,
-            text="HHD MENU",
+            text="  HHD MENU",
+            image=self._hhd_menu_icon,
+            compound="left",
             bg=BLUE_PANEL,
             fg=CYAN,
             font=("Segoe UI", 13, "bold"),
@@ -1592,10 +1766,10 @@ class HHDApp(tk.Tk):
             ("▦  Treatment Calendar", self.show_treatment_calendar),
             ("⌁  Inventory History", self.show_inventory_history),
             ("＋  Received Inventory", self.show_received),
-            ("⚙  Settings / Items", self.show_settings),
             ("⇧  Import Database", self.import_database_action),
             ("⇩  Export Database", self.export_database_action),
             ("⇩  Export CSV", self.export_csv),
+            ("⚙  Settings / Items", self.show_settings),
             ("ⓘ  About", self.show_about),
         ]
         for text, cmd in buttons:
@@ -2067,6 +2241,7 @@ class HHDApp(tk.Tk):
 
         state = {
             "mode": "Month",
+            "last_mode": "Month",
             "anchor": date.today().replace(day=1),
         }
 
@@ -2096,13 +2271,17 @@ class HHDApp(tk.Tk):
             font=("Segoe UI", 14, "bold"),
         ).pack(side="left", expand=True)
 
-        calendar_panel, calendar_body = self.make_panel(self.content, "Calendar")
-        calendar_panel.pack(fill="both", expand=True, padx=16, pady=(0, 10))
-
         legend = tk.Frame(self.content, bg=BLUE_BG)
-        legend.pack(fill="x", padx=18, pady=(0, 14))
+        legend.pack(fill="x", padx=18, pady=(0, 8))
+        tk.Label(
+            legend,
+            text="Legend:",
+            bg=BLUE_BG,
+            fg=TEXT,
+            font=("Segoe UI", 10, "bold"),
+        ).pack(side="left", padx=(0, 10))
         for label, color in [
-            ("Performed", GREEN),
+            ("Complete", GREEN),
             ("Incomplete", YELLOW),
             ("Missed", RED),
         ]:
@@ -2116,6 +2295,9 @@ class HHDApp(tk.Tk):
                 pady=4,
             )
             sample.pack(side="left", padx=(0, 10))
+
+        calendar_panel, calendar_body = self.make_panel(self.content, "Calendar")
+        calendar_panel.pack(fill="both", expand=True, padx=16, pady=(0, 14))
 
         def clear_calendar():
             for child in calendar_body.winfo_children():
@@ -2131,7 +2313,7 @@ class HHDApp(tk.Tk):
             if status == "performed":
                 bg = GREEN
                 fg = "#111111"
-                detail = "Treatment performed"
+                detail = "Complete treatment"
             elif status == "incomplete":
                 bg = YELLOW
                 fg = "#111111"
@@ -2182,7 +2364,15 @@ class HHDApp(tk.Tk):
 
         def render_calendar(*_args):
             clear_calendar()
-            state["mode"] = mode_var.get()
+            selected_mode = mode_var.get()
+
+            if selected_mode == "Week" and state.get("last_mode") != "Week":
+                state["anchor"] = date.today()
+            elif selected_mode == "Month" and state.get("last_mode") != "Month":
+                state["anchor"] = date.today().replace(day=1)
+
+            state["mode"] = selected_mode
+            state["last_mode"] = selected_mode
             anchor = state["anchor"]
 
             for column, weekday in enumerate(["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]):
@@ -2977,21 +3167,134 @@ class HHDApp(tk.Tk):
 
         p2, b2 = self.make_panel(self.content, "Item Management")
         p2.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+
         row = tk.Frame(b2, bg=BLUE_PANEL)
         row.pack(fill="x", pady=(0, 8))
-        self.button(row, f"Add {self.group_display_name(GROUP_NX)} Item", lambda: self.open_item_editor(None, GROUP_NX)).pack(side="left", padx=4)
-        self.button(row, f"Add {self.group_display_name(GROUP_DV)} Item", lambda: self.open_item_editor(None, GROUP_DV)).pack(side="left", padx=4)
-        tk.Label(row, text="Open a supply page to edit, rename, or remove existing items.", bg=BLUE_PANEL, fg=MUTED).pack(side="left", padx=12)
+        self.button(
+            row,
+            f"Add {self.group_display_name(GROUP_NX)} Item",
+            lambda: self.open_item_editor(None, GROUP_NX),
+        ).pack(side="left", padx=4)
+        self.button(
+            row,
+            f"Add {self.group_display_name(GROUP_DV)} Item",
+            lambda: self.open_item_editor(None, GROUP_DV),
+        ).pack(side="left", padx=4)
+
+        item_tree = ttk.Treeview(
+            b2,
+            columns=("group", "item"),
+            show="headings",
+            height=10,
+        )
+        item_tree.heading("group", text="Inventory Group")
+        item_tree.heading("item", text="Item")
+        item_tree.column("group", width=210, minwidth=130, anchor="w")
+        item_tree.column("item", width=420, minwidth=220, anchor="w")
+        item_tree.pack(fill="both", expand=True, pady=(4, 8))
+
+        for inventory_item in self.db.items():
+            item_tree.insert(
+                "",
+                "end",
+                iid=str(inventory_item["id"]),
+                values=(
+                    self.group_display_name(inventory_item["group_name"]),
+                    inventory_item["item_name"],
+                ),
+            )
+
+        self.attach_responsive_tree(
+            item_tree,
+            font_size=10,
+            min_widths={"group": 140, "item": 240},
+            stretch_columns=["item"],
+        )
+
+        actions = tk.Frame(b2, bg=BLUE_PANEL)
+        actions.pack(fill="x")
+
+        def edit_item_management_selected():
+            selection = item_tree.selection()
+            if not selection:
+                self.themed_dialog(
+                    APP_NAME,
+                    "Select an item first.",
+                    [("Close", None)],
+                    width=420,
+                    height=210,
+                )
+                return
+            self.open_item_editor(int(selection[0]))
+
+        def delete_item_management_selected():
+            selection = item_tree.selection()
+            if not selection:
+                self.themed_dialog(
+                    APP_NAME,
+                    "Select an item first.",
+                    [("Close", None)],
+                    width=420,
+                    height=210,
+                )
+                return
+
+            inventory_item = self.db.item_by_id(int(selection[0]))
+            if not inventory_item:
+                return
+
+            confirmed = self.themed_confirm(
+                "Delete Item",
+                "Are you sure?\n\n"
+                f"Delete '{inventory_item['item_name']}' from active inventory?\n\n"
+                "Historical treatment, received-inventory, and correction records "
+                "will be retained.",
+            )
+            if not confirmed:
+                return
+
+            self.db.deactivate_item(inventory_item["id"])
+            self.db.backup_database("change")
+            self.show_settings()
+
+        self.button(
+            actions,
+            "Edit Selected Item",
+            edit_item_management_selected,
+        ).pack(side="left", padx=(0, 8))
+        self.button(
+            actions,
+            "Delete Selected Item",
+            delete_item_management_selected,
+        ).pack(side="left")
+
+        tk.Label(
+            actions,
+            text="Deleted items are removed from active inventory; historical records remain.",
+            bg=BLUE_PANEL,
+            fg=MUTED,
+        ).pack(side="left", padx=14)
 
     def export_csv(self):
-        filename = filedialog.asksaveasfilename(title="Export inventory CSV", defaultextension=".csv", filetypes=[("CSV Files", "*.csv")])
+        filename = filedialog.asksaveasfilename(
+            title="Export Inventory CSV",
+            defaultextension=".csv",
+            initialfile=f"HHD_Inventory_{date.today().isoformat()}.csv",
+            filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")],
+        )
         if not filename:
             return
         try:
             self.db.export_csv(filename)
-            messagebox.showinfo(APP_NAME, f"Exported:\n{filename}")
+            self.themed_export_complete(filename, "CSV Export")
         except Exception as ex:
-            messagebox.showerror(APP_NAME, f"Export failed:\n{ex}")
+            self.themed_dialog(
+                APP_NAME,
+                f"CSV export failed:\n{ex}",
+                [("Close", None)],
+                width=540,
+                height=240,
+            )
 
 if __name__ == "__main__":
     app = HHDApp()

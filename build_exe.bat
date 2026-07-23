@@ -38,6 +38,8 @@ python -m PyInstaller ^
   --icon=hhd_inventory_manager.ico ^
   --add-data "hhd_inventory_manager.ico;." ^
   --add-data "hhd_inventory_manager.png;." ^
+  --add-data "hhd_inventory_manager_about.png;." ^
+  --add-data "hhd_menu_icon.png;." ^
   hhd_inventory_manager.py
 
 if errorlevel 1 (

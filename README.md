@@ -1,5 +1,4 @@
 # HHD Inventory Manager
-<img width="1979" height="1400" alt="image" src="https://github.com/user-attachments/assets/b91cea72-2c8f-40a5-af0e-12e5b1fa2820" />
 
 HHD Inventory Manager is a Windows desktop application for tracking Home Hemodialysis inventory.
 
@@ -78,6 +77,20 @@ The program helps a home hemodialysis caregiver or patient maintain a clear, loc
 - Saving verifies the result before closing; for example, 23.5 must become 23.0.
 - Treatment notes are displayed inside the corresponding Treatment Calendar day.
 
+- Calendar legend remains visible in Month and Week views.
+- Week view opens on the current week when selected.
+- Added Cyberpunk theme with neon cyan, purple, green, yellow, and magenta accents.
+
+
+- Calendar wording changed to Complete treatment; legend now says Complete.
+- Settings / Items moved directly above About.
+- Item Management now includes a selectable item list and Delete Selected Item action with themed confirmation.
+- About dialog follows the current theme and includes a link to the GitHub Releases page.
+- CSV and database export completion dialogs follow the current theme and can open the export folder.
+- HHD MENU heading now includes a medical kidney-style icon.
+
+- Fixed themed confirmation dialog sizing so Yes/No buttons remain fully visible at Windows display scaling levels.
+
 ## Data Storage
 
 Program files can be installed under:
@@ -144,7 +157,7 @@ dist\HHD_Inventory_Manager
 Open the included Inno Setup script:
 
 ```text
-HHD_Inventory_Manager_Setup_ProgramFiles_v1.1.3.iss
+HHD_Inventory_Manager_Setup_ProgramFiles_v1.1.6.iss
 ```
 
 Compile it with Inno Setup to create the Windows installer.
@@ -152,3 +165,13 @@ Compile it with Inno Setup to create the Windows installer.
 ## Important Safety Note
 
 This software is an inventory tracking tool only. It does not replace medical, DaVita, NxStage, physician, nurse, or clinical instructions. Always verify physical inventory before treatment.
+
+## Version 1.1.6
+
+- Added a unified kidney application icon for the EXE, taskbar, title bar, installer, shortcuts, and About window.
+- Added multi-resolution Windows icon sizes from 16×16 through 256×256.
+
+
+### v1.1.6 corrected icon
+- Replaced the bean-shaped icon with the user-approved cyan kidney icon.
+- The same icon is used in the HHD menu, application window, taskbar, executable, installer, and shortcuts.
