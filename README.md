@@ -1,5 +1,11 @@
 # HHD Inventory Manager
 
+
+<img width="1408" height="1032" alt="image" src="https://github.com/user-attachments/assets/d5e2db8b-052b-40f7-8a8c-1f9ee62516e9" />
+
+<img width="1536" height="1024" alt="image" src="https://github.com/user-attachments/assets/ed4f8eb2-2801-40ab-ba78-e1900c7900f7" />
+
+
 HHD Inventory Manager is a Windows desktop application for tracking Home Hemodialysis inventory.
 
 It was created to help manage NxStage and DaVita supplies, monitor remaining units, record received inventory, log dialysis sessions, and identify supplies that need reordering.
