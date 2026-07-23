@@ -18,12 +18,14 @@ import ctypes.wintypes
 import json
 import shutil
 import math
+import calendar
+import tkinter.font as tkfont
 from datetime import datetime, date, timedelta
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
 APP_NAME = "HHD Inventory Manager"
-APP_VERSION = "1.0.10"
+APP_VERSION = "1.1.0"
 DB_NAME = "hhd_inventory.db"
 SETTINGS_FILE = "hhd_inventory_settings.json"
 APP_FOLDER_NAME = "HHD Inventory Manager"
@@ -33,20 +35,105 @@ ROLLING_SETTINGS_BACKUP_NAME = "HHD_Settings_Backup_Current.json"
 AUTO_BACKUP_INTERVAL_MS = 10 * 60 * 1000
 
 
-BLUE_BG = "#062A44"
-BLUE_PANEL = "#083B5E"
-BLUE_PANEL_2 = "#0B456E"
-BLUE_HEADER = "#0A5F92"
-CYAN = "#5ED8FF"
-TEXT = "#EAF8FF"
-MUTED = "#A9D6E8"
-GREEN = "#59D65C"
-YELLOW = "#FFD52E"
-RED = "#FF5A4E"
-BORDER = "#2A8CC4"
-INPUT_BG = "#0D304D"
-BUTTON_BG = "#0D5D8C"
-BUTTON_HOVER = "#1479B5"
+THEMES = {
+    "Medical Blue": {
+        "bg": "#062A44",
+        "panel": "#083B5E",
+        "panel2": "#0B456E",
+        "header": "#0A5F92",
+        "accent": "#5ED8FF",
+        "text": "#EAF8FF",
+        "muted": "#A9D6E8",
+        "green": "#59D65C",
+        "yellow": "#FFD52E",
+        "red": "#FF5A4E",
+        "border": "#2A8CC4",
+        "input": "#0D304D",
+        "button": "#0D5D8C",
+        "button_hover": "#1479B5",
+        "panel_title": "#052239",
+        "status": "#031B2D",
+        "chart": "#052A43",
+        "select": "#126A9F",
+        "calendar_empty": "#0A3553",
+        "dark_titlebar": True,
+    },
+    "Beige": {
+        "bg": "#E8DDC7",
+        "panel": "#F5EEDC",
+        "panel2": "#E1D2B5",
+        "header": "#9A6B3F",
+        "accent": "#6D3F1F",
+        "text": "#2D241C",
+        "muted": "#6B5B4B",
+        "green": "#2E7D32",
+        "yellow": "#B8860B",
+        "red": "#B3261E",
+        "border": "#B99A72",
+        "input": "#FFF9EC",
+        "button": "#A87545",
+        "button_hover": "#8B5D34",
+        "panel_title": "#D2B890",
+        "status": "#C9B18C",
+        "chart": "#FFF9EC",
+        "select": "#8B5D34",
+        "calendar_empty": "#F0E4CD",
+        "dark_titlebar": False,
+    },
+    "Dark": {
+        "bg": "#121417",
+        "panel": "#1D2228",
+        "panel2": "#252B32",
+        "header": "#343B44",
+        "accent": "#7CC7FF",
+        "text": "#F2F4F7",
+        "muted": "#B2BAC4",
+        "green": "#55D66B",
+        "yellow": "#FFD54A",
+        "red": "#FF6B62",
+        "border": "#505A66",
+        "input": "#171B20",
+        "button": "#3A4652",
+        "button_hover": "#4B5B69",
+        "panel_title": "#171B20",
+        "status": "#0D0F12",
+        "chart": "#11161B",
+        "select": "#365D78",
+        "calendar_empty": "#20262D",
+        "dark_titlebar": True,
+    },
+}
+
+def set_theme_palette(theme_name):
+    """Apply a named palette to the module-level colors used by the UI."""
+    global BLUE_BG, BLUE_PANEL, BLUE_PANEL_2, BLUE_HEADER
+    global CYAN, TEXT, MUTED, GREEN, YELLOW, RED, BORDER
+    global INPUT_BG, BUTTON_BG, BUTTON_HOVER
+    global PANEL_TITLE_BG, STATUS_BG, CHART_BG, SELECT_BG, CALENDAR_EMPTY
+
+    theme = THEMES.get(theme_name, THEMES["Medical Blue"])
+    BLUE_BG = theme["bg"]
+    BLUE_PANEL = theme["panel"]
+    BLUE_PANEL_2 = theme["panel2"]
+    BLUE_HEADER = theme["header"]
+    CYAN = theme["accent"]
+    TEXT = theme["text"]
+    MUTED = theme["muted"]
+    GREEN = theme["green"]
+    YELLOW = theme["yellow"]
+    RED = theme["red"]
+    BORDER = theme["border"]
+    INPUT_BG = theme["input"]
+    BUTTON_BG = theme["button"]
+    BUTTON_HOVER = theme["button_hover"]
+    PANEL_TITLE_BG = theme["panel_title"]
+    STATUS_BG = theme["status"]
+    CHART_BG = theme["chart"]
+    SELECT_BG = theme["select"]
+    CALENDAR_EMPTY = theme["calendar_empty"]
+    return theme
+
+set_theme_palette("Medical Blue")
 
 GROUP_NX = "NxStage Supplies"
 GROUP_DV = "DaVita Supplies"
@@ -146,7 +233,7 @@ def _rgb_to_colorref(hex_color):
     b = int(hex_color[4:6], 16)
     return r | (g << 8) | (b << 16)
 
-def request_windows_medical_blue_titlebar(hwnd):
+def request_windows_titlebar(hwnd, caption_color, text_color, border_color, dark_mode=True):
     """
     Ask Windows 11 DWM to use the app's medical-blue title bar colors.
 
@@ -160,10 +247,10 @@ def request_windows_medical_blue_titlebar(hwnd):
         DWMWA_TEXT_COLOR = 36
         DWMWA_BORDER_COLOR = 34
 
-        dark = ctypes.c_int(1)
-        caption = ctypes.c_int(_rgb_to_colorref("#062A44"))
-        text = ctypes.c_int(_rgb_to_colorref("#EAF8FF"))
-        border = ctypes.c_int(_rgb_to_colorref("#2A8CC4"))
+        dark = ctypes.c_int(1 if dark_mode else 0)
+        caption = ctypes.c_int(_rgb_to_colorref(caption_color))
+        text = ctypes.c_int(_rgb_to_colorref(text_color))
+        border = ctypes.c_int(_rgb_to_colorref(border_color))
 
         ctypes.windll.dwmapi.DwmSetWindowAttribute(
             ctypes.wintypes.HWND(hwnd),
@@ -574,6 +661,21 @@ class InventoryDB:
     def recent_sessions(self, limit=30):
         return self.conn.execute("SELECT * FROM session_log ORDER BY session_date DESC,id DESC LIMIT ?", (limit,)).fetchall()
 
+    def sessions_between(self, start_date, end_date):
+        def normalize(value):
+            if isinstance(value, datetime):
+                return value.date().isoformat()
+            if isinstance(value, date):
+                return value.isoformat()
+            return parse_date(value).isoformat()
+
+        return self.conn.execute(
+            """SELECT * FROM session_log
+               WHERE session_date>=? AND session_date<=?
+               ORDER BY session_date,id""",
+            (normalize(start_date), normalize(end_date)),
+        ).fetchall()
+
     def recent_received(self, limit=30):
         return self.conn.execute("""
             SELECT r.*, i.item_name, i.group_name
@@ -657,18 +759,18 @@ class InventoryDB:
 
 class X11TitleBar(tk.Frame):
     def __init__(self, master, title, on_close):
-        super().__init__(master, bg="#031B2D", highlightbackground=BORDER, highlightthickness=1)
+        super().__init__(master, bg=STATUS_BG, highlightbackground=BORDER, highlightthickness=1)
         self.master = master
         self.on_close = on_close
         self._drag_x = 0
         self._drag_y = 0
-        tk.Label(self, text="✚", fg=CYAN, bg="#031B2D", font=("Segoe UI", 14, "bold")).pack(side="left", padx=(12, 8), pady=6)
-        tk.Label(self, text=title, fg=TEXT, bg="#031B2D", font=("Segoe UI", 12, "bold")).pack(side="left", pady=6)
-        btns = tk.Frame(self, bg="#031B2D")
+        tk.Label(self, text="✚", fg=CYAN, bg=STATUS_BG, font=("Segoe UI", 14, "bold")).pack(side="left", padx=(12, 8), pady=6)
+        tk.Label(self, text=title, fg=TEXT, bg=STATUS_BG, font=("Segoe UI", 12, "bold")).pack(side="left", pady=6)
+        btns = tk.Frame(self, bg=STATUS_BG)
         btns.pack(side="right", padx=8)
-        min_btn = tk.Label(btns, text="—", fg=CYAN, bg="#031B2D", font=("Segoe UI", 14), width=3, cursor="hand2")
+        min_btn = tk.Label(btns, text="—", fg=CYAN, bg=STATUS_BG, font=("Segoe UI", 14), width=3, cursor="hand2")
         min_btn.pack(side="left")
-        close_btn = tk.Label(btns, text="✕", fg=CYAN, bg="#031B2D", font=("Segoe UI", 13), width=3, cursor="hand2")
+        close_btn = tk.Label(btns, text="✕", fg=CYAN, bg=STATUS_BG, font=("Segoe UI", 13), width=3, cursor="hand2")
         close_btn.pack(side="left")
         min_btn.bind("<Button-1>", lambda e: master.iconify())
         close_btn.bind("<Button-1>", lambda e: on_close())
@@ -688,6 +790,8 @@ class HHDApp(tk.Tk):
         super().__init__()
         self.db = InventoryDB()
         self.settings_data = self.load_local_settings()
+        self.current_theme = self.settings_data.get("theme", "Medical Blue")
+        self.theme_palette = set_theme_palette(self.current_theme)
         self.title(f"{APP_NAME} v{APP_VERSION}")
         self.geometry(self.settings_data.get("window_geometry", "1280x760"))
         self.minsize(1080, 680)
@@ -698,7 +802,13 @@ class HHDApp(tk.Tk):
         # Use a normal Windows title bar so the taskbar icon appears reliably.
         self.overrideredirect(False)
         self.update_idletasks()
-        request_windows_medical_blue_titlebar(self.winfo_id())
+        request_windows_titlebar(
+            self.winfo_id(),
+            BLUE_BG,
+            TEXT,
+            BORDER,
+            self.theme_palette.get("dark_titlebar", True),
+        )
 
         self.inventory_font_default = 12
         self.inventory_font_min = self.inventory_font_default - 5
@@ -709,6 +819,7 @@ class HHDApp(tk.Tk):
             saved_font_size = self.inventory_font_default
         self.inventory_font_size = max(self.inventory_font_min, min(self.inventory_font_max, saved_font_size))
         self._inventory_font_labels = []
+        self._responsive_trees = []
 
         self.style = ttk.Style()
         self.style.theme_use("clam")
@@ -724,10 +835,17 @@ class HHDApp(tk.Tk):
         self.content = tk.Frame(self.container, bg=BLUE_BG)
         self.content.pack(side="left", fill="both", expand=True)
 
-        self.statusbar = tk.Frame(self, bg="#031B2D", height=24, highlightbackground=BORDER, highlightthickness=1)
+        self.statusbar = tk.Frame(self, bg=STATUS_BG, height=24, highlightbackground=BORDER, highlightthickness=1)
         self.statusbar.pack(fill="x", side="bottom")
-        tk.Label(self.statusbar, text=f"  Data is stored locally in {DB_NAME}    |    Version {APP_VERSION}",
-                 bg="#031B2D", fg=MUTED, anchor="w", font=("Segoe UI", 9)).pack(fill="both")
+        self.statusbar_label = tk.Label(
+            self.statusbar,
+            text=f"  Data is stored locally in {DB_NAME}    |    Version {APP_VERSION}",
+            bg=STATUS_BG,
+            fg=MUTED,
+            anchor="w",
+            font=("Segoe UI", 9),
+        )
+        self.statusbar_label.pack(fill="both")
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.bind("<Configure>", self.remember_window_geometry_event)
@@ -922,6 +1040,25 @@ class HHDApp(tk.Tk):
         except Exception as ex:
             messagebox.showerror(APP_NAME, f"Database import failed:\\n{ex}")
 
+    def export_database_action(self):
+        filename = filedialog.asksaveasfilename(
+            title="Export HHD Inventory Database",
+            defaultextension=".db",
+            initialfile=f"HHD_Inventory_{date.today().isoformat()}.db",
+            filetypes=[("SQLite Database", "*.db"), ("All Files", "*.*")],
+        )
+        if not filename:
+            return
+        try:
+            self.db.conn.commit()
+            shutil.copy2(db_path(), filename)
+            messagebox.showinfo(
+                APP_NAME,
+                f"Database exported successfully:\n{filename}",
+            )
+        except Exception as ex:
+            messagebox.showerror(APP_NAME, f"Database export failed:\n{ex}")
+
     def remember_window_geometry_event(self, event=None):
         """Remember current window state during runtime without constantly writing to disk."""
         try:
@@ -988,7 +1125,7 @@ class HHDApp(tk.Tk):
     def configure_styles(self):
         self.style.configure("Treeview", background=BLUE_PANEL, foreground=TEXT, fieldbackground=BLUE_PANEL, rowheight=28, font=("Segoe UI", 10))
         self.style.configure("Treeview.Heading", background=BLUE_HEADER, foreground=TEXT, font=("Segoe UI", 10, "bold"))
-        self.style.map("Treeview", background=[("selected", "#126A9F")], foreground=[("selected", "white")])
+        self.style.map("Treeview", background=[("selected", SELECT_BG)], foreground=[("selected", "white")])
 
         self.style.configure(
             "Inventory.Treeview",
@@ -1006,7 +1143,7 @@ class HHDApp(tk.Tk):
         )
         self.style.map(
             "Inventory.Treeview",
-            background=[("selected", "#126A9F")],
+            background=[("selected", SELECT_BG)],
             foreground=[("selected", "white")],
         )
 
@@ -1042,6 +1179,168 @@ class HHDApp(tk.Tk):
         self.option_add("*TCombobox*Listbox.selectForeground", TEXT)
         self.option_add("*TCombobox*Listbox.borderWidth", 1)
 
+    def apply_theme(self, theme_name, rebuild=True):
+        self.current_theme = theme_name if theme_name in THEMES else "Medical Blue"
+        self.settings_data["theme"] = self.current_theme
+        self.theme_palette = set_theme_palette(self.current_theme)
+
+        self.configure(bg=BLUE_BG)
+        if hasattr(self, "container"):
+            self.container.configure(bg=BLUE_BG)
+        if hasattr(self, "sidebar"):
+            self.sidebar.configure(bg=BLUE_PANEL)
+        if hasattr(self, "content"):
+            self.content.configure(bg=BLUE_BG)
+        if hasattr(self, "statusbar"):
+            self.statusbar.configure(bg=STATUS_BG, highlightbackground=BORDER)
+        if hasattr(self, "statusbar_label"):
+            self.statusbar_label.configure(bg=STATUS_BG, fg=MUTED)
+
+        self.configure_styles()
+        self.create_status_led_images()
+        request_windows_titlebar(
+            self.winfo_id(),
+            BLUE_BG,
+            TEXT,
+            BORDER,
+            self.theme_palette.get("dark_titlebar", True),
+        )
+        self.save_local_settings()
+
+        if rebuild and hasattr(self, "sidebar"):
+            for widget in self.sidebar.winfo_children():
+                widget.destroy()
+            self.build_sidebar()
+            self.show_settings()
+
+    def attach_responsive_tree(
+        self,
+        tree,
+        font_size,
+        min_widths=None,
+        stretch_columns=None,
+        include_tree_column=False,
+    ):
+        """
+        Keep table row height and column widths appropriate for the active font
+        while preventing the surrounding panel from being forced wider.
+        """
+        min_widths = dict(min_widths or {})
+        stretch_columns = list(stretch_columns or [])
+        record = {
+            "tree": tree,
+            "font_size": font_size,
+            "min_widths": min_widths,
+            "stretch_columns": stretch_columns,
+            "include_tree_column": include_tree_column,
+            "last_width": -1,
+            "pending": None,
+        }
+        self._responsive_trees.append(record)
+
+        def resize(force=False):
+            try:
+                if not tree.winfo_exists():
+                    return
+                available = max(180, tree.winfo_width() - 8)
+                if not force and available == record["last_width"]:
+                    return
+                record["last_width"] = available
+
+                size = font_size() if callable(font_size) else int(font_size)
+                font = tkfont.Font(family="Segoe UI", size=size)
+                heading_font = tkfont.Font(
+                    family="Segoe UI",
+                    size=max(9, size - 1),
+                    weight="bold",
+                )
+                style_name = tree.cget("style") or "Treeview"
+                self.style.configure(
+                    style_name,
+                    rowheight=max(28, font.metrics("linespace") + 12),
+                )
+
+                columns = list(tree["columns"])
+                visible_columns = (["#0"] if include_tree_column else []) + columns
+
+                desired = {}
+                for column in visible_columns:
+                    heading = tree.heading(column).get("text", "")
+                    widest = heading_font.measure(str(heading)) + 24
+                    for iid in tree.get_children(""):
+                        value = (
+                            tree.item(iid, "text")
+                            if column == "#0"
+                            else tree.set(iid, column)
+                        )
+                        widest = max(widest, font.measure(str(value)) + 24)
+                    desired[column] = max(min_widths.get(column, 55), widest)
+
+                total_desired = sum(desired.values())
+                if total_desired <= available:
+                    extra = available - total_desired
+                    targets = stretch_columns or visible_columns
+                    share = extra // max(1, len(targets))
+                    for column in visible_columns:
+                        width = desired[column] + (
+                            share if column in targets else 0
+                        )
+                        tree.column(
+                            column,
+                            width=width,
+                            minwidth=min_widths.get(column, 45),
+                        )
+                else:
+                    minimum_total = sum(
+                        min_widths.get(column, 55)
+                        for column in visible_columns
+                    )
+                    flexible = max(1, total_desired - minimum_total)
+                    usable_extra = max(0, available - minimum_total)
+                    for column in visible_columns:
+                        minimum = min_widths.get(column, 55)
+                        proportional = int(
+                            (desired[column] - minimum)
+                            / flexible
+                            * usable_extra
+                        )
+                        tree.column(
+                            column,
+                            width=max(minimum, minimum + proportional),
+                            minwidth=minimum,
+                        )
+            except Exception:
+                pass
+
+        def schedule_resize(_event=None):
+            try:
+                pending = record.get("pending")
+                if pending is not None:
+                    self.after_cancel(pending)
+                record["pending"] = self.after(80, lambda: resize(False))
+            except Exception:
+                pass
+
+        record["resize"] = resize
+        tree.bind("<Configure>", schedule_resize, add="+")
+        self.after(100, lambda: resize(True))
+        return resize
+
+    def refresh_responsive_trees(self):
+        active = []
+        for record in self._responsive_trees:
+            tree = record["tree"]
+            try:
+                if tree.winfo_exists():
+                    active.append(record)
+                    record["last_width"] = -1
+                    resize = record.get("resize")
+                    if resize:
+                        self.after_idle(lambda func=resize: func(True))
+            except Exception:
+                pass
+        self._responsive_trees = active
+
     def status_display_text(self, status):
         """Return visibly bold Unicode status text for the Status column."""
         return {
@@ -1072,6 +1371,7 @@ class HHDApp(tk.Tk):
             except Exception:
                 pass
         self._inventory_font_labels = active_labels
+        self.refresh_responsive_trees()
 
     def adjust_inventory_font(self, delta):
         new_size = max(
@@ -1152,7 +1452,7 @@ class HHDApp(tk.Tk):
 
         tk.Button(
             bottom,
-            text="✓  Submit Treatment",
+            text="✓  Treatments",
             command=self.show_log_session,
             anchor="center",
             bg=BLUE_HEADER,
@@ -1182,10 +1482,12 @@ class HHDApp(tk.Tk):
             ("⌂  Dashboard", self.show_dashboard),
             (f"▣  {self.group_display_name(GROUP_NX)}", lambda: self.show_inventory(GROUP_NX)),
             (f"▣  {self.group_display_name(GROUP_DV)}", lambda: self.show_inventory(GROUP_DV)),
+            ("▦  Treatment Calendar", self.show_treatment_calendar),
             ("⌁  Inventory History", self.show_inventory_history),
             ("＋  Received Inventory", self.show_received),
             ("⚙  Settings / Items", self.show_settings),
             ("⇧  Import Database", self.import_database_action),
+            ("⇩  Export Database", self.export_database_action),
             ("⇩  Export CSV", self.export_csv),
             ("ⓘ  About", self.show_about),
         ]
@@ -1213,7 +1515,7 @@ class HHDApp(tk.Tk):
 
     def make_panel(self, parent, title):
         panel = tk.Frame(parent, bg=BLUE_PANEL, highlightbackground=BORDER, highlightthickness=1)
-        tk.Label(panel, text=title, bg="#052239", fg=CYAN, font=("Segoe UI", 12, "bold"), anchor="w", padx=12, pady=8).pack(fill="x")
+        tk.Label(panel, text=title, bg=PANEL_TITLE_BG, fg=CYAN, font=("Segoe UI", 12, "bold"), anchor="w", padx=12, pady=8).pack(fill="x")
         body = tk.Frame(panel, bg=BLUE_PANEL)
         body.pack(fill="both", expand=True, padx=12, pady=12)
         return panel, body
@@ -1228,7 +1530,7 @@ class HHDApp(tk.Tk):
                                        bg=BLUE_BG, fg=TEXT, font=("Segoe UI", 12))
         self.datetime_label.pack(side="left", padx=40)
         self.button(top, "Add Received Inventory", self.show_received).pack(side="right", padx=6)
-        self.button(top, "Submit Treatment", self.show_log_session).pack(side="right", padx=6)
+        self.button(top, "Treatments", self.show_log_session).pack(side="right", padx=6)
 
         row = tk.Frame(self.content, bg=BLUE_BG)
         row.pack(fill="both", expand=True, padx=16, pady=8)
@@ -1304,6 +1606,19 @@ class HHDApp(tk.Tk):
                 anchor="w" if c == "item" else "center",
             )
         tree.pack(fill="both", expand=True)
+        self.attach_responsive_tree(
+            tree,
+            font_size=lambda: self.inventory_font_size,
+            min_widths={
+                "#0": 50 if compact else 60,
+                "item": 110 if compact else 180,
+                "units": 62,
+                "weeks": 66,
+                "status": 74,
+            },
+            stretch_columns=["item"],
+            include_tree_column=True,
+        )
 
         tree.tag_configure("ok", foreground=GREEN)
         tree.tag_configure("low", foreground=YELLOW)
@@ -1544,6 +1859,211 @@ class HHDApp(tk.Tk):
     def selected_item_id_from_value(self, value):
         return getattr(self, "_item_dropdown_map", {}).get(value)
 
+    def treatment_day_statuses(self, start_date, end_date):
+        statuses = {}
+        for record in self.db.sessions_between(start_date, end_date):
+            day = parse_date(record["session_date"])
+            treatment_type = (record["session_type"] or "").lower()
+            if "missed" in treatment_type:
+                status = "missed"
+            elif "incomplete" in treatment_type:
+                status = "incomplete"
+            else:
+                status = "performed"
+
+            # Priority when more than one record exists on a date:
+            # missed > incomplete > performed.
+            priority = {"performed": 1, "incomplete": 2, "missed": 3}
+            if priority[status] >= priority.get(statuses.get(day, ""), 0):
+                statuses[day] = status
+        return statuses
+
+    def show_treatment_calendar(self):
+        self.clear_content()
+        tk.Label(
+            self.content,
+            text="Treatment Calendar",
+            bg=BLUE_BG,
+            fg=CYAN,
+            font=("Segoe UI", 17, "bold"),
+        ).pack(anchor="w", padx=16, pady=12)
+
+        state = {
+            "mode": "Month",
+            "anchor": date.today().replace(day=1),
+        }
+
+        controls_panel, controls = self.make_panel(self.content, "Calendar Controls")
+        controls_panel.pack(fill="x", padx=16, pady=(0, 12))
+
+        title_var = tk.StringVar()
+        mode_var = tk.StringVar(value="Month")
+
+        self.button(controls, "◀ Previous", lambda: move_period(-1)).pack(side="left", padx=(0, 6))
+        self.button(controls, "Today", lambda: go_today()).pack(side="left", padx=6)
+        self.button(controls, "Next ▶", lambda: move_period(1)).pack(side="left", padx=6)
+
+        ttk.Combobox(
+            controls,
+            textvariable=mode_var,
+            values=["Month", "Week"],
+            state="readonly",
+            width=10,
+        ).pack(side="right")
+
+        tk.Label(
+            controls,
+            textvariable=title_var,
+            bg=BLUE_PANEL,
+            fg=TEXT,
+            font=("Segoe UI", 14, "bold"),
+        ).pack(side="left", expand=True)
+
+        calendar_panel, calendar_body = self.make_panel(self.content, "Calendar")
+        calendar_panel.pack(fill="both", expand=True, padx=16, pady=(0, 10))
+
+        legend = tk.Frame(self.content, bg=BLUE_BG)
+        legend.pack(fill="x", padx=18, pady=(0, 14))
+        for label, color in [
+            ("Performed", GREEN),
+            ("Incomplete", YELLOW),
+            ("Missed", RED),
+        ]:
+            sample = tk.Label(
+                legend,
+                text=f"  {label}  ",
+                bg=color,
+                fg="#111111",
+                font=("Segoe UI", 10, "bold"),
+                padx=8,
+                pady=4,
+            )
+            sample.pack(side="left", padx=(0, 10))
+
+        def clear_calendar():
+            for child in calendar_body.winfo_children():
+                child.destroy()
+
+        def display_cell(parent, row, column, day_value, current_month=True):
+            status = state.get("statuses", {}).get(day_value)
+            bg = CALENDAR_EMPTY
+            fg = TEXT if current_month else MUTED
+            detail = ""
+            if status == "performed":
+                bg = GREEN
+                fg = "#111111"
+                detail = "Treatment performed"
+            elif status == "incomplete":
+                bg = YELLOW
+                fg = "#111111"
+                detail = "Incomplete treatment"
+            elif status == "missed":
+                bg = RED
+                fg = "#111111"
+                detail = "Missed treatment"
+
+            cell = tk.Frame(
+                parent,
+                bg=bg,
+                highlightbackground=BORDER,
+                highlightthickness=1,
+            )
+            cell.grid(row=row, column=column, sticky="nsew", padx=2, pady=2)
+            tk.Label(
+                cell,
+                text=str(day_value.day),
+                bg=bg,
+                fg=fg,
+                font=("Segoe UI", 13, "bold"),
+                anchor="nw",
+            ).pack(fill="x", padx=8, pady=(7, 2))
+            if detail:
+                tk.Label(
+                    cell,
+                    text=detail,
+                    bg=bg,
+                    fg=fg,
+                    wraplength=130,
+                    justify="left",
+                    font=("Segoe UI", 9, "bold"),
+                ).pack(anchor="w", padx=8, pady=(2, 7))
+
+        def render_calendar(*_args):
+            clear_calendar()
+            state["mode"] = mode_var.get()
+            anchor = state["anchor"]
+
+            for column, weekday in enumerate(["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]):
+                calendar_body.grid_columnconfigure(column, weight=1, uniform="calendar_days")
+                tk.Label(
+                    calendar_body,
+                    text=weekday,
+                    bg=BLUE_HEADER,
+                    fg=TEXT,
+                    font=("Segoe UI", 11, "bold"),
+                    pady=7,
+                ).grid(row=0, column=column, sticky="nsew", padx=2, pady=(0, 2))
+
+            if state["mode"] == "Week":
+                week_start = anchor - timedelta(days=(anchor.weekday() + 1) % 7)
+                week_end = week_start + timedelta(days=6)
+                title_var.set(
+                    f"{week_start.strftime('%B %d, %Y')} – {week_end.strftime('%B %d, %Y')}"
+                )
+                state["statuses"] = self.treatment_day_statuses(week_start, week_end)
+                calendar_body.grid_rowconfigure(1, weight=1)
+                for column in range(7):
+                    display_cell(calendar_body, 1, column, week_start + timedelta(days=column), True)
+            else:
+                month_start = anchor.replace(day=1)
+                next_month = (
+                    month_start.replace(year=month_start.year + 1, month=1)
+                    if month_start.month == 12
+                    else month_start.replace(month=month_start.month + 1)
+                )
+                visible_start = month_start - timedelta(days=(month_start.weekday() + 1) % 7)
+                visible_end = visible_start + timedelta(days=41)
+                title_var.set(month_start.strftime("%B %Y"))
+                state["statuses"] = self.treatment_day_statuses(visible_start, visible_end)
+
+                for row_index in range(1, 7):
+                    calendar_body.grid_rowconfigure(row_index, weight=1, uniform="calendar_weeks")
+                    for column in range(7):
+                        day_value = visible_start + timedelta(days=(row_index - 1) * 7 + column)
+                        display_cell(
+                            calendar_body,
+                            row_index,
+                            column,
+                            day_value,
+                            day_value.month == month_start.month,
+                        )
+
+        def move_period(direction):
+            if mode_var.get() == "Week":
+                state["anchor"] = state["anchor"] + timedelta(days=7 * direction)
+            else:
+                current = state["anchor"].replace(day=1)
+                if direction > 0:
+                    state["anchor"] = (
+                        current.replace(year=current.year + 1, month=1)
+                        if current.month == 12
+                        else current.replace(month=current.month + 1)
+                    )
+                else:
+                    state["anchor"] = (
+                        current.replace(year=current.year - 1, month=12)
+                        if current.month == 1
+                        else current.replace(month=current.month - 1)
+                    )
+            render_calendar()
+
+        def go_today():
+            state["anchor"] = date.today()
+            render_calendar()
+
+        mode_var.trace_add("write", render_calendar)
+        render_calendar()
+
     def draw_inventory_history_chart(
         self, canvas, item, points, period_start=None, period_end=None
     ):
@@ -1579,7 +2099,7 @@ class HHDApp(tk.Tk):
 
         canvas.create_rectangle(
             left, top, left + plot_w, top + plot_h,
-            outline=BORDER, fill="#052A43"
+            outline=BORDER, fill=CHART_BG
         )
 
         available_start = points[0][0] if points else None
@@ -1590,7 +2110,7 @@ class HHDApp(tk.Tk):
                 top,
                 unavailable_right,
                 top + plot_h,
-                fill="#082338",
+                fill=BLUE_PANEL_2,
                 outline="",
             )
             canvas.create_text(
@@ -1799,7 +2319,7 @@ class HHDApp(tk.Tk):
 
         canvas = tk.Canvas(
             chart_body,
-            bg="#052A43",
+            bg=CHART_BG,
             highlightbackground=BORDER,
             highlightthickness=1,
         )
@@ -1947,6 +2467,12 @@ class HHDApp(tk.Tk):
         for c, h, w in [("date","Date",110),("group","Group",170),("item","Item",310),("units","Units",90),("notes","Notes",320)]:
             tree.heading(c, text=h); tree.column(c, width=w, anchor="w")
         tree.pack(fill="both", expand=True)
+        self.attach_responsive_tree(
+            tree,
+            font_size=10,
+            min_widths={"date": 90, "group": 110, "item": 150, "units": 65, "notes": 140},
+            stretch_columns=["item", "notes"],
+        )
         for r in self.db.recent_received(50):
             tree.insert("", "end", values=(r["received_date"], self.group_display_name(r["group_name"]), r["item_name"], r["units"], r["notes"] or ""))
 
@@ -1954,7 +2480,7 @@ class HHDApp(tk.Tk):
         self.clear_content()
         tk.Label(
             self.content,
-            text="Submit Treatment",
+            text="Treatments",
             bg=BLUE_BG,
             fg=CYAN,
             font=("Segoe UI", 17, "bold"),
@@ -2096,7 +2622,7 @@ class HHDApp(tk.Tk):
         )
         self.style.map(
             "TreatmentHistory.Treeview",
-            background=[("selected", "#126A9F")],
+            background=[("selected", SELECT_BG)],
             foreground=[("selected", "white")],
         )
 
@@ -2119,6 +2645,12 @@ class HHDApp(tk.Tk):
                 anchor="w",
             )
         treatment_tree.pack(fill="both", expand=True)
+        self.attach_responsive_tree(
+            treatment_tree,
+            font_size=12,
+            min_widths={"date": 120, "type": 200},
+            stretch_columns=["type"],
+        )
 
         notes_header = tk.Frame(history_body, bg=BLUE_PANEL)
         notes_header.pack(fill="x", pady=(10, 5))
@@ -2136,7 +2668,7 @@ class HHDApp(tk.Tk):
             history_body,
             height=6,
             wrap="word",
-            bg="#052A43",
+            bg=CHART_BG,
             fg=TEXT,
             insertbackground=TEXT,
             relief="solid",
@@ -2214,17 +2746,21 @@ class HHDApp(tk.Tk):
         first_day_var = tk.StringVar(value=self.db.get_setting("first_session_day", "Sunday"))
         nx_group_var = tk.StringVar(value=self.group_display_name(GROUP_NX))
         dv_group_var = tk.StringVar(value=self.group_display_name(GROUP_DV))
+        theme_var = tk.StringVar(value=self.current_theme)
         rows = [
             ("Patient Name", patient_var, "entry"),
             ("Dialysis Sessions Per Week", sessions_var, "entry"),
             ("Week's First Session Day", first_day_var, "combo"),
             ("First Inventory Group Name", nx_group_var, "entry"),
             ("Second Inventory Group Name", dv_group_var, "entry"),
+            ("Application Theme", theme_var, "theme"),
         ]
         for idx, (lab, var, typ) in enumerate(rows):
             tk.Label(body, text=lab, bg=BLUE_PANEL, fg=TEXT).grid(row=idx, column=0, sticky="w", padx=10, pady=8)
             if typ == "combo":
                 e = ttk.Combobox(body, textvariable=var, values=["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"], width=30, state="readonly")
+            elif typ == "theme":
+                e = ttk.Combobox(body, textvariable=var, values=list(THEMES.keys()), width=30, state="readonly")
             else:
                 e = tk.Entry(body, textvariable=var, bg=INPUT_BG, fg=TEXT, insertbackground=TEXT, relief="solid", bd=1, width=34)
             e.grid(row=idx, column=1, sticky="w", padx=10, pady=8)
@@ -2237,14 +2773,15 @@ class HHDApp(tk.Tk):
                 self.db.set_setting("first_session_day", first_day_var.get())
                 self.db.set_setting("group_nx_display_name", nx_group_var.get().strip() or GROUP_NX)
                 self.db.set_setting("group_dv_display_name", dv_group_var.get().strip() or GROUP_DV)
-                self.save_local_settings()
+                selected_theme = theme_var.get() if theme_var.get() in THEMES else "Medical Blue"
+                self.apply_theme(selected_theme, rebuild=False)
                 for widget in self.sidebar.winfo_children():
                     widget.destroy()
                 self.build_sidebar()
                 self.show_settings()
             except Exception as ex:
                 messagebox.showerror(APP_NAME, f"Could not save settings:\n{ex}")
-        self.button(body, "Save Settings", save_settings).grid(row=5, column=1, sticky="w", padx=10, pady=14)
+        self.button(body, "Save Settings", save_settings).grid(row=6, column=1, sticky="w", padx=10, pady=14)
 
         p2, b2 = self.make_panel(self.content, "Item Management")
         p2.pack(fill="both", expand=True, padx=16, pady=(0, 16))
