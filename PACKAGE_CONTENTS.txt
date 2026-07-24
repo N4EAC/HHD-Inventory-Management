@@ -1,7 +1,5 @@
 HHD Inventory Manager 1.1.6 Corrected Package
 
-.gitignore
-HHD_Inventory_Manager_Setup.iss
 HHD_Inventory_Manager_Setup_ProgramFiles_v1.1.6.iss
 HHD_Inventory_Manager_User_Manual.pdf
 PACKAGE_CONTENTS.txt
