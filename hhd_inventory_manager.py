@@ -26,7 +26,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
 APP_NAME = "HHD Inventory Manager"
-APP_VERSION = "1.1.6"
+APP_VERSION = "1.2.3"
 DB_NAME = "hhd_inventory.db"
 SETTINGS_FILE = "hhd_inventory_settings.json"
 APP_FOLDER_NAME = "HHD Inventory Manager"
@@ -102,7 +102,32 @@ THEMES = {
         "select": "#365D78",
         "calendar_empty": "#20262D",
         "dark_titlebar": True,
-    },    "Cyberpunk": {
+    },    "Gray 95": {
+        "bg": "#C0C0C0",
+        "panel": "#D4D0C8",
+        "panel2": "#E0E0E0",
+        "header": "#000080",
+        "accent": "#000080",
+        "text": "#000000",
+        "muted": "#555555",
+        "green": "#008000",
+        "yellow": "#A07000",
+        "red": "#C00000",
+        "border": "#808080",
+        "input": "#FFFFFF",
+        "button": "#D4D0C8",
+        "button_hover": "#B8B8B8",
+        "panel_title": "#C0C0C0",
+        "status": "#D4D0C8",
+        "chart": "#FFFFFF",
+        "select": "#000080",
+        "calendar_empty": "#E8E8E8",
+        "header_text": "#FFFFFF",
+        "selected_text": "#FFFFFF",
+        "blue_button_text": "#FFFFFF",
+        "dark_titlebar": False,
+    },
+    "Cyberpunk": {
         "bg": "#090B14",
         "panel": "#111526",
         "panel2": "#171D33",
@@ -133,6 +158,7 @@ def set_theme_palette(theme_name):
     global CYAN, TEXT, MUTED, GREEN, YELLOW, RED, BORDER
     global INPUT_BG, BUTTON_BG, BUTTON_HOVER
     global PANEL_TITLE_BG, STATUS_BG, CHART_BG, SELECT_BG, CALENDAR_EMPTY
+    global HEADER_TEXT, SELECTED_TEXT, BLUE_BUTTON_TEXT
 
     theme = THEMES.get(theme_name, THEMES["Medical Blue"])
     BLUE_BG = theme["bg"]
@@ -154,6 +180,9 @@ def set_theme_palette(theme_name):
     CHART_BG = theme["chart"]
     SELECT_BG = theme["select"]
     CALENDAR_EMPTY = theme["calendar_empty"]
+    HEADER_TEXT = theme.get("header_text", TEXT)
+    SELECTED_TEXT = theme.get("selected_text", "#FFFFFF")
+    BLUE_BUTTON_TEXT = theme.get("blue_button_text", TEXT)
     return theme
 
 set_theme_palette("Medical Blue")
@@ -379,6 +408,7 @@ class InventoryDB:
             auto_session_usage INTEGER NOT NULL DEFAULT 1,
             full_attempt_usage INTEGER NOT NULL DEFAULT 0,
             allow_half_removal INTEGER NOT NULL DEFAULT 0,
+            disallow_half_usage INTEGER NOT NULL DEFAULT 0,
             active INTEGER NOT NULL DEFAULT 1,
             UNIQUE(group_name, item_name)
         );
@@ -397,7 +427,21 @@ class InventoryDB:
             session_date TEXT NOT NULL,
             session_type TEXT NOT NULL,
             session_equivalent REAL NOT NULL DEFAULT 1,
-            notes TEXT
+            notes TEXT,
+            pak_lot TEXT NOT NULL DEFAULT '',
+            sak_lot TEXT NOT NULL DEFAULT '',
+            cartridge_lot TEXT NOT NULL DEFAULT '',
+            cycler_serial TEXT NOT NULL DEFAULT '',
+            pureflow_serial TEXT NOT NULL DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS session_item_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            item_id INTEGER NOT NULL,
+            units_used REAL NOT NULL,
+            FOREIGN KEY(session_id) REFERENCES session_log(id),
+            FOREIGN KEY(item_id) REFERENCES items(id)
         );
 
         CREATE TABLE IF NOT EXISTS corrections (
@@ -424,6 +468,29 @@ class InventoryDB:
             c.execute(
                 "ALTER TABLE items ADD COLUMN allow_half_removal INTEGER NOT NULL DEFAULT 0"
             )
+        if "disallow_half_usage" not in item_columns:
+            c.execute(
+                "ALTER TABLE items ADD COLUMN disallow_half_usage INTEGER NOT NULL DEFAULT 0"
+            )
+
+        session_columns = {
+            row["name"] for row in c.execute(
+                "PRAGMA table_info(session_log)"
+            ).fetchall()
+        }
+        treatment_identity_columns = {
+            "pak_lot": "TEXT NOT NULL DEFAULT ''",
+            "sak_lot": "TEXT NOT NULL DEFAULT ''",
+            "cartridge_lot": "TEXT NOT NULL DEFAULT ''",
+            "cycler_serial": "TEXT NOT NULL DEFAULT ''",
+            "pureflow_serial": "TEXT NOT NULL DEFAULT ''",
+        }
+        for column_name, column_definition in treatment_identity_columns.items():
+            if column_name not in session_columns:
+                c.execute(
+                    f"ALTER TABLE session_log ADD COLUMN "
+                    f"{column_name} {column_definition}"
+                )
 
         defaults = {
             "patient_name": "Patient Name",
@@ -432,6 +499,11 @@ class InventoryDB:
             "group_nx_display_name": "NxStage Supplies",
             "group_dv_display_name": "DaVita Supplies",
             "created_date": iso_today(),
+            "last_pak_lot": "",
+            "last_sak_lot": "",
+            "last_cartridge_lot": "",
+            "last_cycler_serial": "",
+            "last_pureflow_serial": "",
         }
         for k, v in defaults.items():
             c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
@@ -475,7 +547,7 @@ class InventoryDB:
                  min_threshold=0, low_threshold=0, units_per_session=0,
                  units_per_week=0, reusable_sessions=1, lifespan_days=0,
                  auto_session_usage=1, full_attempt_usage=0,
-                 allow_half_removal=0):
+                 allow_half_removal=0, disallow_half_usage=0):
         item_name = item_name.strip()
         if not item_name:
             raise ValueError("Item name cannot be blank.")
@@ -486,15 +558,16 @@ class InventoryDB:
             INSERT INTO items(
                 group_name,item_name,baseline_units,baseline_date,min_threshold,low_threshold,
                 units_per_session,units_per_week,reusable_sessions,lifespan_days,
-                auto_session_usage,full_attempt_usage,allow_half_removal,active
+                auto_session_usage,full_attempt_usage,allow_half_removal,
+                disallow_half_usage,active
             )
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)
         """, (
             group_name, item_name, float(baseline_units), baseline_date,
             float(min_threshold), float(low_threshold), float(units_per_session),
             float(units_per_week), max(float(reusable_sessions), 1.0),
             int(lifespan_days), int(auto_session_usage), int(full_attempt_usage),
-            int(allow_half_removal)
+            int(allow_half_removal), int(disallow_half_usage)
         ))
         self.conn.commit()
 
@@ -503,7 +576,7 @@ class InventoryDB:
             "group_name", "item_name", "baseline_units", "baseline_date", "min_threshold",
             "low_threshold", "units_per_session", "units_per_week", "reusable_sessions",
             "lifespan_days", "auto_session_usage", "full_attempt_usage",
-            "allow_half_removal", "active"
+            "allow_half_removal", "disallow_half_usage", "active"
         }
         parts, values = [], []
         for k, v in kwargs.items():
@@ -607,12 +680,133 @@ class InventoryDB:
 
         return before, after
 
-    def add_session(self, session_date, session_type, session_equivalent, notes=""):
+    def add_session(
+        self,
+        session_date,
+        session_type,
+        session_equivalent,
+        notes="",
+        pak_lot="",
+        sak_lot="",
+        cartridge_lot="",
+        cycler_serial="",
+        pureflow_serial="",
+    ):
+        values = {
+            "pak_lot": str(pak_lot).strip(),
+            "sak_lot": str(sak_lot).strip(),
+            "cartridge_lot": str(cartridge_lot).strip(),
+            "cycler_serial": str(cycler_serial).strip(),
+            "pureflow_serial": str(pureflow_serial).strip(),
+        }
+        for label, value in [
+            ("PAK lot number", values["pak_lot"]),
+            ("SAK lot number", values["sak_lot"]),
+            ("Cartridge lot number", values["cartridge_lot"]),
+            ("Cycler serial number", values["cycler_serial"]),
+            ("PureFlow serial number", values["pureflow_serial"]),
+        ]:
+            if len(value) > 80:
+                raise ValueError(f"{label} must be 80 characters or fewer.")
+
+        cursor = self.conn.execute(
+            """INSERT INTO session_log(
+                   session_date, session_type, session_equivalent, notes,
+                   pak_lot, sak_lot, cartridge_lot,
+                   cycler_serial, pureflow_serial
+               ) VALUES(?,?,?,?,?,?,?,?,?)""",
+            (
+                session_date,
+                session_type,
+                session_equivalent,
+                notes,
+                values["pak_lot"],
+                values["sak_lot"],
+                values["cartridge_lot"],
+                values["cycler_serial"],
+                values["pureflow_serial"],
+            ),
+        )
+
+        if "missed" not in str(session_type).lower():
+            remembered_values = [
+                ("last_pak_lot", values["pak_lot"]),
+                ("last_sak_lot", values["sak_lot"]),
+                ("last_cartridge_lot", values["cartridge_lot"]),
+                ("last_cycler_serial", values["cycler_serial"]),
+                ("last_pureflow_serial", values["pureflow_serial"]),
+            ]
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
+                remembered_values,
+            )
+
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def add_session_item_usage(self, session_id, item_id, units_used):
+        units = validate_half_unit(units_used, "Incomplete treatment units")
+        if units < 0.5 or units > 10:
+            raise ValueError("Incomplete treatment usage must be between 0.5 and 10 units.")
         self.conn.execute(
-            "INSERT INTO session_log(session_date,session_type,session_equivalent,notes) VALUES(?,?,?,?)",
-            (session_date, session_type, session_equivalent, notes)
+            "INSERT INTO session_item_usage(session_id,item_id,units_used) VALUES(?,?,?)",
+            (session_id, item_id, units),
         )
         self.conn.commit()
+
+    def session_item_usages(self, session_id):
+        return self.conn.execute(
+            """SELECT u.*, i.item_name, i.group_name
+               FROM session_item_usage u JOIN items i ON i.id=u.item_id
+               WHERE u.session_id=? ORDER BY i.group_name,i.item_name""",
+            (session_id,),
+        ).fetchall()
+
+    def item_session_usage_units(self, item, since_date, through_date=None):
+        """Calculate actual units used, honoring per-item incomplete entries."""
+        params = [since_date]
+        end_clause = ""
+        if through_date is not None:
+            end_clause = " AND s.session_date<=?"
+            params.append(through_date)
+        sessions = self.conn.execute(
+            f"""SELECT s.* FROM session_log s
+                WHERE s.session_date>=? {end_clause}
+                ORDER BY s.session_date,s.id""",
+            tuple(params),
+        ).fetchall()
+        total = 0.0
+        for session in sessions:
+            stype = (session["session_type"] or "").lower()
+            if "missed" in stype:
+                continue
+            if "incomplete" in stype:
+                row = self.conn.execute(
+                    "SELECT COALESCE(SUM(units_used),0) AS total FROM session_item_usage WHERE session_id=? AND item_id=?",
+                    (session["id"], item["id"]),
+                ).fetchone()
+                total += float(row["total"] or 0)
+                continue
+            if int(item["auto_session_usage"] or 0) != 1:
+                continue
+            reusable = max(float(item["reusable_sessions"] or 1), 1.0)
+            treatment_equivalent = float(session["session_equivalent"] or 1)
+            amount = (
+                float(item["units_per_session"] or 0)
+                / reusable
+                * treatment_equivalent
+            )
+
+            # This option applies to each complete treatment after all usage
+            # multipliers have been applied.  A calculated half-unit deduction
+            # must therefore become the next whole unit (0.5 -> 1, 1.5 -> 2).
+            # Rounding before treatment_equivalent was applied allowed some
+            # complete-treatment entries to still deduct only 0.5.
+            if int(item["disallow_half_usage"] or 0) == 1:
+                amount = math.ceil(amount - 1e-9)
+
+            total += amount
+        return total
 
     def session_by_id(self, session_id):
         return self.conn.execute(
@@ -705,13 +899,7 @@ class InventoryDB:
         received = float(received_row["total"])
         corrections = float(correction_row["total"])
         sessions = self.session_usage_sum(item, baseline_iso, as_of_iso)
-
-        session_usage = 0.0
-        if int(item["auto_session_usage"]) == 1:
-            reusable = max(float(item["reusable_sessions"] or 1), 1.0)
-            session_usage = sessions * (
-                float(item["units_per_session"]) / reusable
-            )
+        session_usage = self.item_session_usage_units(item, baseline_iso, as_of_iso)
 
         elapsed_weeks = max(0.0, (as_of - baseline_date).days / 7.0)
         weekly_usage = elapsed_weeks * float(item["units_per_week"])
@@ -760,11 +948,7 @@ class InventoryDB:
         received = self.received_sum(item["id"], since)
         corrections = self.corrections_sum(item["id"], since)
         sessions = self.session_usage_sum(item, since)
-
-        session_usage = 0.0
-        if int(item["auto_session_usage"]) == 1:
-            reusable = max(float(item["reusable_sessions"] or 1), 1.0)
-            session_usage = sessions * (float(item["units_per_session"]) / reusable)
+        session_usage = self.item_session_usage_units(item, since)
 
         weekly_usage = self.weeks_since(since) * float(item["units_per_week"])
         used = session_usage + weekly_usage
@@ -784,6 +968,8 @@ class InventoryDB:
     def weeks_remaining(self, item, current):
         sessions_per_week = float(self.get_setting("sessions_per_week", "4") or 4)
         per_session = float(item["units_per_session"] or 0) / max(float(item["reusable_sessions"] or 1), 1.0)
+        if int(item["disallow_half_usage"] or 0) == 1:
+            per_session = math.ceil(per_session - 1e-9)
         per_week = float(item["units_per_week"] or 0)
         weekly_rate = (per_session * sessions_per_week) + per_week
 
@@ -810,6 +996,20 @@ class InventoryDB:
                WHERE session_date>=? AND session_date<=?
                ORDER BY session_date,id""",
             (normalize(start_date), normalize(end_date)),
+        ).fetchall()
+
+    def search_treatment_lots(self, search_text):
+        term = str(search_text or "").strip()
+        if not term:
+            return []
+        pattern = f"%{term}%"
+        return self.conn.execute(
+            """SELECT * FROM session_log
+               WHERE pak_lot LIKE ? COLLATE NOCASE
+                  OR sak_lot LIKE ? COLLATE NOCASE
+                  OR cartridge_lot LIKE ? COLLATE NOCASE
+               ORDER BY session_date DESC, id DESC""",
+            (pattern, pattern, pattern),
         ).fetchall()
 
     def recent_received(self, limit=30):
@@ -988,6 +1188,7 @@ class HHDApp(tk.Tk):
         self.create_status_led_images()
         self._status_trees = []
         self._blink_on = True
+        self.build_windows_menu()
         self.build_sidebar()
         self.show_dashboard()
         self.schedule_clock_update()
@@ -1101,7 +1302,7 @@ class HHDApp(tk.Tk):
             header,
             text=title,
             bg=BLUE_HEADER,
-            fg=TEXT,
+            fg=HEADER_TEXT,
             font=("Segoe UI", 14, "bold"),
             anchor="w",
             padx=18,
@@ -1217,7 +1418,7 @@ class HHDApp(tk.Tk):
             title_area,
             text=APP_NAME,
             bg=BLUE_HEADER,
-            fg=TEXT,
+            fg=HEADER_TEXT,
             font=("Segoe UI", 16, "bold"),
         ).pack(anchor="w")
         tk.Label(
@@ -1399,8 +1600,8 @@ class HHDApp(tk.Tk):
 
     def configure_styles(self):
         self.style.configure("Treeview", background=BLUE_PANEL, foreground=TEXT, fieldbackground=BLUE_PANEL, rowheight=28, font=("Segoe UI", 10))
-        self.style.configure("Treeview.Heading", background=BLUE_HEADER, foreground=TEXT, font=("Segoe UI", 10, "bold"))
-        self.style.map("Treeview", background=[("selected", SELECT_BG)], foreground=[("selected", "white")])
+        self.style.configure("Treeview.Heading", background=BLUE_HEADER, foreground=HEADER_TEXT, font=("Segoe UI", 10, "bold"))
+        self.style.map("Treeview", background=[("selected", SELECT_BG)], foreground=[("selected", SELECTED_TEXT)])
 
         self.style.configure(
             "Inventory.Treeview",
@@ -1413,13 +1614,13 @@ class HHDApp(tk.Tk):
         self.style.configure(
             "Inventory.Treeview.Heading",
             background=BLUE_HEADER,
-            foreground=TEXT,
+            foreground=HEADER_TEXT,
             font=("Segoe UI", max(9, self.inventory_font_size - 1), "bold"),
         )
         self.style.map(
             "Inventory.Treeview",
             background=[("selected", SELECT_BG)],
-            foreground=[("selected", "white")],
+            foreground=[("selected", SELECTED_TEXT)],
         )
 
         # Dark themed combo boxes. The map() calls are important on Windows,
@@ -1443,7 +1644,7 @@ class HHDApp(tk.Tk):
             background=[("readonly", INPUT_BG), ("disabled", INPUT_BG), ("!disabled", INPUT_BG)],
             foreground=[("readonly", TEXT), ("disabled", MUTED), ("!disabled", TEXT)],
             selectbackground=[("readonly", BLUE_HEADER), ("!disabled", BLUE_HEADER)],
-            selectforeground=[("readonly", TEXT), ("!disabled", TEXT)],
+            selectforeground=[("readonly", HEADER_TEXT), ("!disabled", HEADER_TEXT)],
             arrowcolor=[("readonly", CYAN), ("!disabled", CYAN)],
         )
 
@@ -1451,7 +1652,7 @@ class HHDApp(tk.Tk):
         self.option_add("*TCombobox*Listbox.background", INPUT_BG)
         self.option_add("*TCombobox*Listbox.foreground", TEXT)
         self.option_add("*TCombobox*Listbox.selectBackground", BLUE_HEADER)
-        self.option_add("*TCombobox*Listbox.selectForeground", TEXT)
+        self.option_add("*TCombobox*Listbox.selectForeground", HEADER_TEXT)
         self.option_add("*TCombobox*Listbox.borderWidth", 1)
 
     def apply_theme(self, theme_name, rebuild=True):
@@ -1721,19 +1922,33 @@ class HHDApp(tk.Tk):
         return tk.Button(parent, text=text, command=command, bg=BUTTON_BG, fg=TEXT, activebackground=BUTTON_HOVER,
                          activeforeground=TEXT, relief="flat", padx=14, pady=7, font=("Segoe UI", 10), cursor="hand2")
 
+    def build_windows_menu(self):
+        menubar = tk.Menu(self)
+
+        menubar.add_command(
+            label="Settings / Items",
+            command=self.show_settings,
+        )
+        menubar.add_command(
+            label="About",
+            command=self.show_about,
+        )
+
+        self.configure(menu=menubar)
+
     def build_sidebar(self):
         bottom = tk.Frame(self.sidebar, bg=BLUE_PANEL)
         bottom.pack(side="bottom", fill="x", padx=8, pady=(8, 14))
 
         tk.Button(
             bottom,
-            text="✓  Treatments",
+            text="✓  Record Treatment",
             command=self.show_log_session,
             anchor="center",
             bg=BLUE_HEADER,
-            fg=TEXT,
+            fg=BLUE_BUTTON_TEXT,
             activebackground=BUTTON_HOVER,
-            activeforeground=TEXT,
+            activeforeground=BLUE_BUTTON_TEXT,
             relief="raised",
             bd=1,
             font=("Segoe UI", 12, "bold"),
@@ -1764,13 +1979,13 @@ class HHDApp(tk.Tk):
             (f"▣  {self.group_display_name(GROUP_NX)}", lambda: self.show_inventory(GROUP_NX)),
             (f"▣  {self.group_display_name(GROUP_DV)}", lambda: self.show_inventory(GROUP_DV)),
             ("▦  Treatment Calendar", self.show_treatment_calendar),
+            ("▤  Treatment History", self.show_treatment_history),
             ("⌁  Inventory History", self.show_inventory_history),
             ("＋  Received Inventory", self.show_received),
-            ("⇧  Import Database", self.import_database_action),
-            ("⇩  Export Database", self.export_database_action),
-            ("⇩  Export CSV", self.export_csv),
-            ("⚙  Settings / Items", self.show_settings),
-            ("ⓘ  About", self.show_about),
+            ("⌕  Lot Number Search", self.show_lot_number_search),
+            ("⇧  Import DB", self.import_database_action),
+            ("⇩  Export DB", self.export_database_action),
+            ("⇩  Export Inventory CSV", self.export_csv),
         ]
         for text, cmd in buttons:
             tk.Button(
@@ -1811,7 +2026,7 @@ class HHDApp(tk.Tk):
                                        bg=BLUE_BG, fg=TEXT, font=("Segoe UI", 12))
         self.datetime_label.pack(side="left", padx=40)
         self.button(top, "Add Received Inventory", self.show_received).pack(side="right", padx=6)
-        self.button(top, "Treatments", self.show_log_session).pack(side="right", padx=6)
+        self.button(top, "Record Treatment", self.show_log_session).pack(side="right", padx=6)
 
         row = tk.Frame(self.content, bg=BLUE_BG)
         row.pack(fill="both", expand=True, padx=16, pady=8)
@@ -2036,6 +2251,18 @@ class HHDApp(tk.Tk):
                        bg=BLUE_PANEL, fg=TEXT, activebackground=BLUE_PANEL, activeforeground=TEXT,
                        selectcolor=INPUT_BG, font=("Segoe UI", 10)).grid(row=len(rows), column=0, columnspan=2, sticky="w", padx=14, pady=(10, 4))
 
+        no_half_var = tk.IntVar(
+            value=0 if is_new else int(item["disallow_half_usage"] or 0)
+        )
+        tk.Checkbutton(
+            form,
+            text="Do not allow .5 usage for this item (complete treatments round up to 1)",
+            variable=no_half_var,
+            bg=BLUE_PANEL, fg=TEXT,
+            activebackground=BLUE_PANEL, activeforeground=TEXT,
+            selectcolor=INPUT_BG, font=("Segoe UI", 10),
+        ).grid(row=len(rows)+1, column=0, columnspan=2, sticky="w", padx=14, pady=(4, 4))
+
         full_attempt_var = tk.IntVar(
             value=1 if (is_new and name_var.get().strip().upper() == "SAK")
             else (0 if is_new else int(item["full_attempt_usage"] or 0))
@@ -2051,7 +2278,7 @@ class HHDApp(tk.Tk):
             selectcolor=INPUT_BG,
             font=("Segoe UI", 10),
         ).grid(
-            row=len(rows)+1,
+            row=len(rows)+2,
             column=0,
             columnspan=2,
             sticky="w",
@@ -2072,7 +2299,7 @@ class HHDApp(tk.Tk):
             font=("Segoe UI", 10, "bold"),
         )
         remove_half_check.grid(
-            row=len(rows)+2,
+            row=len(rows)+3,
             column=0,
             columnspan=2,
             sticky="w",
@@ -2092,7 +2319,7 @@ class HHDApp(tk.Tk):
             justify="left",
             font=("Segoe UI", 9),
         ).grid(
-            row=len(rows)+3,
+            row=len(rows)+4,
             column=0,
             columnspan=2,
             sticky="w",
@@ -2112,7 +2339,7 @@ class HHDApp(tk.Tk):
             wraplength=500,
             justify="left",
             font=("Segoe UI", 9)
-        ).grid(row=len(rows)+4, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 10))
+        ).grid(row=len(rows)+5, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 10))
 
         form.columnconfigure(1, weight=1)
 
@@ -2142,6 +2369,7 @@ class HHDApp(tk.Tk):
                     "min_threshold": float(vars_["min_threshold"].get() or 0),
                     "auto_session_usage": int(auto_var.get()),
                     "full_attempt_usage": int(full_attempt_var.get()),
+                    "disallow_half_usage": int(no_half_var.get()),
                 }
                 if not item_name:
                     raise ValueError("Item name cannot be blank.")
@@ -2207,8 +2435,6 @@ class HHDApp(tk.Tk):
 
     def treatment_day_statuses(self, start_date, end_date):
         days = {}
-        priority = {"performed": 1, "incomplete": 2, "missed": 3}
-
         for record in self.db.sessions_between(start_date, end_date):
             day = parse_date(record["session_date"])
             treatment_type = (record["session_type"] or "").lower()
@@ -2217,234 +2443,503 @@ class HHDApp(tk.Tk):
             elif "incomplete" in treatment_type:
                 status = "incomplete"
             else:
-                status = "performed"
-
-            entry = days.setdefault(day, {"status": status, "notes": []})
-            if priority[status] >= priority[entry["status"]]:
-                entry["status"] = status
-
-            note = (record["notes"] or "").strip()
-            if note and note not in entry["notes"]:
-                entry["notes"].append(note)
-
+                status = "complete"
+            usages = [
+                dict(row)
+                for row in self.db.session_item_usages(record["id"])
+            ]
+            days.setdefault(day, []).append({
+                "id": record["id"],
+                "status": status,
+                "type": record["session_type"],
+                "notes": (record["notes"] or "").strip(),
+                "usages": usages,
+                "record": dict(record),
+            })
         return days
 
-    def show_treatment_calendar(self):
+    def show_treatment_detail_dialog(self, day_value, treatments):
+        win = tk.Toplevel(self)
+        win.overrideredirect(True)
+        win.configure(bg=BORDER)
+        width = 560
+        height = min(620, 170 + len(treatments) * 150)
+        self.update_idletasks()
+        x = self.winfo_rootx() + max(0, (self.winfo_width() - width) // 2)
+        y = self.winfo_rooty() + max(0, (self.winfo_height() - height) // 2)
+        win.geometry(f"{width}x{height}+{x}+{y}")
+        win.transient(self)
+        win.grab_set()
+        outer = tk.Frame(win, bg=BLUE_BG, highlightbackground=BORDER, highlightthickness=2)
+        outer.pack(fill="both", expand=True, padx=2, pady=2)
+        tk.Label(outer, text=day_value.strftime("%A, %B %d, %Y"), bg=BLUE_HEADER,
+                 fg=HEADER_TEXT, font=("Segoe UI", 15, "bold"), pady=12).pack(fill="x")
+        body = tk.Frame(outer, bg=BLUE_PANEL)
+        body.pack(fill="both", expand=True, padx=14, pady=14)
+        colors = {"complete": GREEN, "incomplete": YELLOW, "missed": RED}
+        for treatment in treatments:
+            color = colors[treatment["status"]]
+            card = tk.Frame(body, bg=BLUE_PANEL_2, highlightbackground=color, highlightthickness=2)
+            card.pack(fill="x", pady=(0, 10))
+            tk.Label(card, text=treatment["type"], bg=color, fg="#111111",
+                     font=("Segoe UI", 11, "bold"), padx=10, pady=6).pack(fill="x")
+            details = []
+            record = treatment.get("record", {})
+            identity_lines = [
+                (
+                    f"PAK lot#: {record.get('pak_lot', '')}"
+                    if record.get("pak_lot")
+                    else ""
+                ),
+                (
+                    f"SAK lot#: {record.get('sak_lot', '')}"
+                    if record.get("sak_lot")
+                    else ""
+                ),
+                (
+                    f"Cartridge lot#: {record.get('cartridge_lot', '')}"
+                    if record.get("cartridge_lot")
+                    else ""
+                ),
+                (
+                    f"Cycler serial#: {record.get('cycler_serial', '')}"
+                    if record.get("cycler_serial")
+                    else ""
+                ),
+                (
+                    f"PureFlow serial#: {record.get('pureflow_serial', '')}"
+                    if record.get("pureflow_serial")
+                    else ""
+                ),
+            ]
+            identity_lines = [line for line in identity_lines if line]
+            if identity_lines:
+                details.append("Lot and equipment information:")
+                details.extend(f"• {line}" for line in identity_lines)
+
+            if treatment["usages"]:
+                if details:
+                    details.append("")
+                details.append("Items used:")
+                details.extend(
+                    f"• {u['item_name']}: {float(u['units_used']):g}"
+                    for u in treatment["usages"]
+                )
+
+            if treatment["notes"]:
+                details.append(
+                    ("\n" if details else "")
+                    + "Notes: "
+                    + treatment["notes"]
+                )
+
+            if not details:
+                details = [
+                    "No notes, item usage, or lot information recorded."
+                ]
+            tk.Label(card, text="\n".join(details), bg=BLUE_PANEL_2, fg=TEXT,
+                     justify="left", anchor="w", wraplength=490, padx=12, pady=10).pack(fill="x")
+        ok_button = self.button(body, "OK", win.destroy)
+        ok_button.configure(width=12)
+        ok_button.pack(anchor="e", pady=(2, 0))
+        win.bind("<Escape>", lambda _e: win.destroy())
+        win.focus_force()
+
+    def show_lot_number_search(self):
         self.clear_content()
         tk.Label(
             self.content,
-            text="Treatment Calendar",
+            text="Lot Number Search",
             bg=BLUE_BG,
             fg=CYAN,
             font=("Segoe UI", 17, "bold"),
         ).pack(anchor="w", padx=16, pady=12)
 
-        state = {
-            "mode": "Month",
-            "last_mode": "Month",
-            "anchor": date.today().replace(day=1),
-        }
+        search_panel, search_body = self.make_panel(
+            self.content,
+            "Search PAK, SAK, or Cartridge Lot Numbers",
+        )
+        search_panel.pack(fill="x", padx=16, pady=(0, 12))
 
-        controls_panel, controls = self.make_panel(self.content, "Calendar Controls")
-        controls_panel.pack(fill="x", padx=16, pady=(0, 12))
-
-        title_var = tk.StringVar()
-        mode_var = tk.StringVar(value="Month")
-
-        self.button(controls, "◀ Previous", lambda: move_period(-1)).pack(side="left", padx=(0, 6))
-        self.button(controls, "Today", lambda: go_today()).pack(side="left", padx=6)
-        self.button(controls, "Next ▶", lambda: move_period(1)).pack(side="left", padx=6)
-
-        ttk.Combobox(
-            controls,
-            textvariable=mode_var,
-            values=["Month", "Week"],
-            state="readonly",
-            width=10,
-        ).pack(side="right")
-
+        query_var = tk.StringVar()
         tk.Label(
-            controls,
-            textvariable=title_var,
+            search_body,
+            text="Lot number contains:",
             bg=BLUE_PANEL,
             fg=TEXT,
-            font=("Segoe UI", 14, "bold"),
-        ).pack(side="left", expand=True)
+        ).pack(side="left", padx=(0, 8))
+        query_entry = tk.Entry(
+            search_body,
+            textvariable=query_var,
+            bg=INPUT_BG,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief="solid",
+            bd=1,
+            width=36,
+        )
+        query_entry.pack(side="left", padx=(0, 8))
 
-        legend = tk.Frame(self.content, bg=BLUE_BG)
-        legend.pack(fill="x", padx=18, pady=(0, 8))
+        results_panel, results_body = self.make_panel(
+            self.content,
+            "Search Results",
+        )
+        results_panel.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+
+        columns = (
+            "date", "type", "pak", "sak", "cartridge", "notes"
+        )
+        tree = ttk.Treeview(
+            results_body,
+            columns=columns,
+            show="headings",
+            height=18,
+        )
+        specs = [
+            ("date", "Treatment Date", 120, False),
+            ("type", "Treatment Type", 150, False),
+            ("pak", "PAK lot#", 140, False),
+            ("sak", "SAK lot#", 140, False),
+            ("cartridge", "Cartridge lot#", 150, False),
+            ("notes", "Notes", 320, True),
+        ]
+        for col, title, width, stretch in specs:
+            tree.heading(col, text=title)
+            tree.column(col, width=width, minwidth=90, stretch=stretch, anchor="w")
+        tree.pack(fill="both", expand=True)
+        current_results = []
+
+        def normalized_type(raw):
+            value = str(raw or "").lower()
+            if "missed" in value:
+                return "Missed"
+            if "incomplete" in value:
+                return "Incomplete"
+            return "Completed"
+
+        def run_search(*_):
+            nonlocal current_results
+            for iid in tree.get_children():
+                tree.delete(iid)
+            term = query_var.get().strip()
+            if not term:
+                current_results = []
+                return
+            current_results = [dict(row) for row in self.db.search_treatment_lots(term)]
+            for row in current_results:
+                tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        row["session_date"],
+                        normalized_type(row["session_type"]),
+                        row["pak_lot"],
+                        row["sak_lot"],
+                        row["cartridge_lot"],
+                        row["notes"] or "",
+                    ),
+                )
+
+        def export_results():
+            if not current_results:
+                self.themed_dialog(
+                    APP_NAME,
+                    "There are no search results to export.",
+                    [("Close", None)],
+                    width=450,
+                    height=220,
+                )
+                return
+            filename = filedialog.asksaveasfilename(
+                title="Export Lot Search Results",
+                defaultextension=".csv",
+                initialfile=f"HHD_Lot_Search_{date.today().isoformat()}.csv",
+                filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")],
+            )
+            if not filename:
+                return
+            try:
+                with open(filename, "w", newline="", encoding="utf-8-sig") as handle:
+                    writer = csv.writer(handle)
+                    writer.writerow([
+                        "Treatment Date", "Treatment Type", "PAK lot#",
+                        "SAK lot#", "Cartridge lot#", "Notes",
+                    ])
+                    for row in current_results:
+                        writer.writerow([
+                            row["session_date"],
+                            normalized_type(row["session_type"]),
+                            row["pak_lot"], row["sak_lot"],
+                            row["cartridge_lot"], row["notes"] or "",
+                        ])
+                self.themed_export_complete(filename, "Lot Search Export")
+            except Exception as ex:
+                self.themed_dialog(
+                    APP_NAME,
+                    f"Could not export search results:\n{ex}",
+                    [("Close", None)],
+                    width=540,
+                    height=240,
+                )
+
+        self.button(search_body, "Search", run_search).pack(side="left", padx=(0, 8))
+        self.button(search_body, "Export Results", export_results).pack(side="left")
+        query_entry.bind("<Return>", run_search)
+        query_entry.focus_set()
+
+    def edit_treatment_notes_dialog(self, session_id, return_to_history=False):
+        """Open a centered themed editor for an existing treatment note."""
+        record = self.db.session_by_id(session_id)
+        if not record:
+            self.themed_dialog(
+                APP_NAME,
+                "The selected treatment could not be found.",
+                [("Close", None)],
+                width=480,
+                height=220,
+            )
+            return
+
+        win = tk.Toplevel(self)
+        win.title("Edit Treatment Notes")
+        win.configure(bg=BLUE_BG)
+        win.resizable(False, False)
+        self.center_child_window(win, 620, 420)
+        win.transient(self)
+        win.grab_set()
+        request_windows_titlebar(
+            win.winfo_id(),
+            BLUE_BG,
+            TEXT,
+            BORDER,
+            self.theme_palette.get("dark_titlebar", True),
+        )
+
+        header = tk.Frame(win, bg=BLUE_HEADER)
+        header.pack(fill="x")
         tk.Label(
-            legend,
-            text="Legend:",
-            bg=BLUE_BG,
+            header,
+            text="Edit Treatment Notes",
+            bg=BLUE_HEADER,
+            fg=HEADER_TEXT,
+            font=("Segoe UI", 14, "bold"),
+            anchor="w",
+            padx=18,
+            pady=12,
+        ).pack(fill="x")
+
+        body = tk.Frame(
+            win,
+            bg=BLUE_PANEL,
+            highlightbackground=BORDER,
+            highlightthickness=1,
+        )
+        body.pack(fill="both", expand=True, padx=16, pady=16)
+
+        tk.Label(
+            body,
+            text=f"{record['session_date']} — {record['session_type']}",
+            bg=BLUE_PANEL,
+            fg=CYAN,
+            font=("Segoe UI", 11, "bold"),
+            anchor="w",
+        ).pack(fill="x", padx=14, pady=(14, 8))
+
+        tk.Label(
+            body,
+            text="Treatment Notes:",
+            bg=BLUE_PANEL,
             fg=TEXT,
             font=("Segoe UI", 10, "bold"),
-        ).pack(side="left", padx=(0, 10))
-        for label, color in [
-            ("Complete", GREEN),
-            ("Incomplete", YELLOW),
-            ("Missed", RED),
-        ]:
-            sample = tk.Label(
-                legend,
-                text=f"  {label}  ",
-                bg=color,
-                fg="#111111",
-                font=("Segoe UI", 10, "bold"),
-                padx=8,
-                pady=4,
-            )
-            sample.pack(side="left", padx=(0, 10))
+            anchor="w",
+        ).pack(fill="x", padx=14, pady=(0, 6))
 
-        calendar_panel, calendar_body = self.make_panel(self.content, "Calendar")
-        calendar_panel.pack(fill="both", expand=True, padx=16, pady=(0, 14))
+        notes_box = tk.Text(
+            body,
+            height=10,
+            wrap="word",
+            bg=INPUT_BG,
+            fg=TEXT,
+            insertbackground=TEXT,
+            selectbackground=SELECT_BG,
+            relief="solid",
+            bd=1,
+            font=("Segoe UI", 10),
+        )
+        notes_box.pack(fill="both", expand=True, padx=14, pady=(0, 12))
+        notes_box.insert("1.0", record["notes"] or "")
+
+        button_row = tk.Frame(body, bg=BLUE_PANEL)
+        button_row.pack(fill="x", padx=14, pady=(0, 14))
+
+        def save_notes():
+            try:
+                self.db.update_session_notes(
+                    session_id,
+                    notes_box.get("1.0", "end-1c").strip(),
+                )
+                self.db.backup_database("change")
+                win.destroy()
+                if return_to_history:
+                    self.show_treatment_history()
+                else:
+                    self.show_log_session()
+            except Exception as ex:
+                self.themed_dialog(
+                    APP_NAME,
+                    f"Could not update treatment notes:\n{ex}",
+                    [("Close", None)],
+                    width=540,
+                    height=250,
+                )
+
+        self.button(button_row, "Cancel", win.destroy).pack(side="right", padx=(8, 0))
+        self.button(button_row, "Save Notes", save_notes).pack(side="right")
+
+        win.bind("<Escape>", lambda _event: win.destroy())
+        notes_box.focus_set()
+
+    def show_treatment_calendar(self):
+        self.clear_content()
+        tk.Label(self.content, text="Treatment Calendar", bg=BLUE_BG, fg=CYAN,
+                 font=("Segoe UI", 17, "bold")).pack(anchor="w", padx=16, pady=12)
+        state={"mode":"Month","last_mode":"Month","anchor":date.today().replace(day=1),"fade_step":0,"fade_direction":1,"today_cells":[],"fade_job":None}
+        controls_panel, controls=self.make_panel(self.content,"Calendar Controls")
+        controls_panel.pack(fill="x",padx=16,pady=(0,12))
+        title_var=tk.StringVar(); mode_var=tk.StringVar(value="Month")
+        self.button(controls,"◀ Previous",lambda:move_period(-1)).pack(side="left",padx=(0,6))
+        self.button(controls,"Today",lambda:go_today()).pack(side="left",padx=6)
+        self.button(controls,"Next ▶",lambda:move_period(1)).pack(side="left",padx=6)
+        self.button(controls,"Export Calendar CSV",lambda:export_calendar_csv()).pack(side="right",padx=(8,0))
+        ttk.Combobox(controls,textvariable=mode_var,values=["Month","Week"],state="readonly",width=10).pack(side="right")
+        tk.Label(controls,textvariable=title_var,bg=BLUE_PANEL,fg=TEXT,font=("Segoe UI",14,"bold")).pack(side="left",expand=True)
+        legend=tk.Frame(self.content,bg=BLUE_BG); legend.pack(fill="x",padx=18,pady=(0,8))
+        tk.Label(legend,text="Legend:",bg=BLUE_BG,fg=TEXT,font=("Segoe UI",10,"bold")).pack(side="left",padx=(0,10))
+        for label,color in [("Complete",GREEN),("Incomplete",YELLOW),("Missed",RED)]:
+            tk.Label(legend,text=f"  {label}  ",bg=color,fg="#111111",font=("Segoe UI",10,"bold"),padx=8,pady=4).pack(side="left",padx=(0,10))
+        calendar_panel,calendar_body=self.make_panel(self.content,"Calendar")
+        calendar_panel.pack(fill="both",expand=True,padx=16,pady=(0,14))
 
         def clear_calendar():
-            for child in calendar_body.winfo_children():
-                child.destroy()
-
-        def display_cell(parent, row, column, day_value, current_month=True):
-            day_entry = state.get("statuses", {}).get(day_value, {})
-            status = day_entry.get("status")
-            notes = day_entry.get("notes", [])
-            bg = CALENDAR_EMPTY
-            fg = TEXT if current_month else MUTED
-            detail = ""
-            if status == "performed":
-                bg = GREEN
-                fg = "#111111"
-                detail = "Complete treatment"
-            elif status == "incomplete":
-                bg = YELLOW
-                fg = "#111111"
-                detail = "Incomplete treatment"
-            elif status == "missed":
-                bg = RED
-                fg = "#111111"
-                detail = "Missed treatment"
-
-            cell = tk.Frame(
-                parent,
-                bg=bg,
-                highlightbackground=BORDER,
-                highlightthickness=1,
-            )
-            cell.grid(row=row, column=column, sticky="nsew", padx=2, pady=2)
-            tk.Label(
-                cell,
-                text=str(day_value.day),
-                bg=bg,
-                fg=fg,
-                font=("Segoe UI", 13, "bold"),
-                anchor="nw",
-            ).pack(fill="x", padx=8, pady=(7, 2))
-            if detail:
-                tk.Label(
-                    cell,
-                    text=detail,
-                    bg=bg,
-                    fg=fg,
-                    wraplength=150,
-                    justify="left",
-                    font=("Segoe UI", 9, "bold"),
-                ).pack(anchor="w", padx=8, pady=(2, 3))
-
-            if notes:
-                notes_text = "\n".join(notes)
-                tk.Label(
-                    cell,
-                    text=notes_text,
-                    bg=bg,
-                    fg=fg,
-                    wraplength=150,
-                    justify="left",
-                    anchor="nw",
-                    font=("Segoe UI", 8),
-                ).pack(fill="both", expand=True, anchor="w", padx=8, pady=(0, 7))
-
+            state["today_cells"]=[]
+            for child in calendar_body.winfo_children(): child.destroy()
+        def display_cell(parent,row,column,day_value,current_month=True):
+            treatments=state.get("statuses",{}).get(day_value,[])
+            cell=tk.Frame(parent,bg=CALENDAR_EMPTY,highlightbackground=BORDER,highlightthickness=2,cursor="hand2" if treatments else "arrow")
+            cell.grid(row=row,column=column,sticky="nsew",padx=2,pady=2)
+            if day_value==date.today(): state["today_cells"].append(cell)
+            fg=TEXT if current_month else MUTED
+            tk.Label(cell,text=str(day_value.day),bg=CALENDAR_EMPTY,fg=fg,font=("Segoe UI",12,"bold"),anchor="nw").pack(fill="x",padx=6,pady=(5,2))
+            bands=tk.Frame(cell,bg=CALENDAR_EMPTY); bands.pack(fill="both",expand=True,padx=3,pady=(0,3))
+            colors={"complete":GREEN,"incomplete":YELLOW,"missed":RED}
+            names={"complete":"Complete","incomplete":"Incomplete","missed":"Missed"}
+            for tr in treatments:
+                band=tk.Frame(bands,bg=colors[tr["status"]])
+                band.pack(fill="both",expand=True,pady=1)
+                tk.Label(band,text=names[tr["status"]],bg=colors[tr["status"]],fg="#111111",font=("Segoe UI",8,"bold"),anchor="w",padx=5).pack(fill="both",expand=True)
+            if treatments:
+                def open_detail(_e=None,d=day_value,t=treatments): self.show_treatment_detail_dialog(d,t)
+                for widget in [cell,bands]+list(cell.winfo_children())+list(bands.winfo_children()): widget.bind("<Button-1>",open_detail)
         def render_calendar(*_args):
-            clear_calendar()
-            selected_mode = mode_var.get()
-
-            if selected_mode == "Week" and state.get("last_mode") != "Week":
-                state["anchor"] = date.today()
-            elif selected_mode == "Month" and state.get("last_mode") != "Month":
-                state["anchor"] = date.today().replace(day=1)
-
-            state["mode"] = selected_mode
-            state["last_mode"] = selected_mode
-            anchor = state["anchor"]
-
-            for column, weekday in enumerate(["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]):
-                calendar_body.grid_columnconfigure(column, weight=1, uniform="calendar_days")
-                tk.Label(
-                    calendar_body,
-                    text=weekday,
-                    bg=BLUE_HEADER,
-                    fg=TEXT,
-                    font=("Segoe UI", 11, "bold"),
-                    pady=7,
-                ).grid(row=0, column=column, sticky="nsew", padx=2, pady=(0, 2))
-
-            if state["mode"] == "Week":
-                week_start = anchor - timedelta(days=(anchor.weekday() + 1) % 7)
-                week_end = week_start + timedelta(days=6)
-                title_var.set(
-                    f"{week_start.strftime('%B %d, %Y')} – {week_end.strftime('%B %d, %Y')}"
-                )
-                state["statuses"] = self.treatment_day_statuses(week_start, week_end)
-                calendar_body.grid_rowconfigure(1, weight=1)
-                for column in range(7):
-                    display_cell(calendar_body, 1, column, week_start + timedelta(days=column), True)
+            clear_calendar(); selected=mode_var.get()
+            if selected=="Week" and state["last_mode"]!="Week": state["anchor"]=date.today()
+            elif selected=="Month" and state["last_mode"]!="Month": state["anchor"]=date.today().replace(day=1)
+            state["mode"]=selected; state["last_mode"]=selected; anchor=state["anchor"]
+            for col,weekday in enumerate(["Sun","Mon","Tue","Wed","Thu","Fri","Sat"]):
+                calendar_body.grid_columnconfigure(col,weight=1,uniform="calendar_days")
+                tk.Label(calendar_body,text=weekday,bg=BLUE_HEADER,fg=HEADER_TEXT,font=("Segoe UI",11,"bold"),pady=7).grid(row=0,column=col,sticky="nsew",padx=2,pady=(0,2))
+            if selected=="Week":
+                ws=anchor-timedelta(days=(anchor.weekday()+1)%7); we=ws+timedelta(days=6)
+                title_var.set(f"{ws.strftime('%B %d, %Y')} – {we.strftime('%B %d, %Y')}")
+                state["statuses"]=self.treatment_day_statuses(ws,we); calendar_body.grid_rowconfigure(1,weight=1)
+                for col in range(7): display_cell(calendar_body,1,col,ws+timedelta(days=col),True)
             else:
-                month_start = anchor.replace(day=1)
-                next_month = (
-                    month_start.replace(year=month_start.year + 1, month=1)
-                    if month_start.month == 12
-                    else month_start.replace(month=month_start.month + 1)
-                )
-                visible_start = month_start - timedelta(days=(month_start.weekday() + 1) % 7)
-                visible_end = visible_start + timedelta(days=41)
-                title_var.set(month_start.strftime("%B %Y"))
-                state["statuses"] = self.treatment_day_statuses(visible_start, visible_end)
+                ms=anchor.replace(day=1); vs=ms-timedelta(days=(ms.weekday()+1)%7); ve=vs+timedelta(days=41)
+                title_var.set(ms.strftime("%B %Y")); state["statuses"]=self.treatment_day_statuses(vs,ve)
+                for ri in range(1,7):
+                    calendar_body.grid_rowconfigure(ri,weight=1,uniform="calendar_weeks")
+                    for col in range(7):
+                        d=vs+timedelta(days=(ri-1)*7+col); display_cell(calendar_body,ri,col,d,d.month==ms.month)
+        def blend_hex(start_color, end_color, ratio):
+            ratio = max(0.0, min(1.0, ratio))
+            def rgb(value):
+                value = value.lstrip("#")
+                return tuple(int(value[i:i+2], 16) for i in (0, 2, 4))
+            a = rgb(start_color)
+            b = rgb(end_color)
+            mixed = tuple(round(a[i] + (b[i] - a[i]) * ratio) for i in range(3))
+            return "#{:02x}{:02x}{:02x}".format(*mixed)
 
-                for row_index in range(1, 7):
-                    calendar_body.grid_rowconfigure(row_index, weight=1, uniform="calendar_weeks")
-                    for column in range(7):
-                        day_value = visible_start + timedelta(days=(row_index - 1) * 7 + column)
-                        display_cell(
-                            calendar_body,
-                            row_index,
-                            column,
-                            day_value,
-                            day_value.month == month_start.month,
+        def fade_today():
+            try:
+                state["fade_step"] += state["fade_direction"]
+                if state["fade_step"] >= 20:
+                    state["fade_step"] = 20
+                    state["fade_direction"] = -1
+                elif state["fade_step"] <= 0:
+                    state["fade_step"] = 0
+                    state["fade_direction"] = 1
+                ratio = state["fade_step"] / 20.0
+                border_color = blend_hex(BORDER, CYAN, ratio)
+                thickness = 2 + round(2 * ratio)
+                for cell in state["today_cells"]:
+                    if cell.winfo_exists():
+                        cell.configure(
+                            highlightbackground=border_color,
+                            highlightthickness=thickness,
                         )
+                state["fade_job"] = self.after(90, fade_today)
+            except tk.TclError:
+                state["fade_job"] = None
+
+        def export_calendar_csv():
+            filename = filedialog.asksaveasfilename(
+                title="Export Treatment Calendar CSV",
+                defaultextension=".csv",
+                initialfile=f"HHD_Treatment_Calendar_{date.today().isoformat()}.csv",
+                filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")],
+            )
+            if not filename:
+                return
+            try:
+                rows = self.db.sessions_between(date(1900, 1, 1), date(2999, 12, 31))
+                with open(filename, "w", newline="", encoding="utf-8-sig") as handle:
+                    writer = csv.writer(handle)
+                    writer.writerow([
+                        "Treatment Date", "Treatment Type", "PAK lot#",
+                        "SAK lot#", "Cartridge lot#", "Notes",
+                    ])
+                    for record in rows:
+                        raw = str(record["session_type"] or "").lower()
+                        treatment_type = (
+                            "Missed" if "missed" in raw else
+                            "Incomplete" if "incomplete" in raw else
+                            "Completed"
+                        )
+                        writer.writerow([
+                            record["session_date"], treatment_type,
+                            record["pak_lot"], record["sak_lot"],
+                            record["cartridge_lot"], record["notes"] or "",
+                        ])
+                self.themed_export_complete(filename, "Treatment Calendar Export")
+            except Exception as ex:
+                self.themed_dialog(
+                    APP_NAME,
+                    f"Could not export the treatment calendar:\n{ex}",
+                    [("Close", None)],
+                    width=550,
+                    height=250,
+                )
 
         def move_period(direction):
-            if mode_var.get() == "Week":
-                state["anchor"] = state["anchor"] + timedelta(days=7 * direction)
+            if mode_var.get()=="Week": state["anchor"]+=timedelta(days=7*direction)
             else:
-                current = state["anchor"].replace(day=1)
-                if direction > 0:
-                    state["anchor"] = (
-                        current.replace(year=current.year + 1, month=1)
-                        if current.month == 12
-                        else current.replace(month=current.month + 1)
-                    )
-                else:
-                    state["anchor"] = (
-                        current.replace(year=current.year - 1, month=12)
-                        if current.month == 1
-                        else current.replace(month=current.month - 1)
-                    )
+                cur=state["anchor"].replace(day=1)
+                if direction>0: state["anchor"]=cur.replace(year=cur.year+1,month=1) if cur.month==12 else cur.replace(month=cur.month+1)
+                else: state["anchor"]=cur.replace(year=cur.year-1,month=12) if cur.month==1 else cur.replace(month=cur.month-1)
             render_calendar()
-
-        def go_today():
-            state["anchor"] = date.today()
-            render_calendar()
-
-        mode_var.trace_add("write", render_calendar)
-        render_calendar()
+        def go_today(): state["anchor"]=date.today(); render_calendar()
+        mode_var.trace_add("write",render_calendar); render_calendar(); fade_today()
 
     def draw_inventory_history_chart(
         self, canvas, item, points, period_start=None, period_end=None
@@ -2875,19 +3370,27 @@ class HHDApp(tk.Tk):
         type_var = tk.StringVar(value="Regular Treatment")
         equiv_var = tk.StringVar(value="1")
 
-        entry_rows = [
+        basic_fields = [
             ("Treatment Date YYYY-MM-DD", date_var, "entry"),
             ("Treatment Type", type_var, "combo"),
             ("Treatment Equivalent", equiv_var, "entry"),
         ]
-        for index, (label_text, variable, control_type) in enumerate(entry_rows):
+        for row_index, (label, variable, control_type) in enumerate(
+            basic_fields
+        ):
             tk.Label(
                 body,
-                text=label_text,
+                text=label,
                 bg=BLUE_PANEL,
                 fg=TEXT,
-                font=("Segoe UI", 10),
-            ).grid(row=index, column=0, sticky="nw", padx=10, pady=7)
+            ).grid(
+                row=row_index,
+                column=0,
+                sticky="nw",
+                padx=10,
+                pady=7,
+            )
+
             if control_type == "combo":
                 control = ttk.Combobox(
                     body,
@@ -2912,7 +3415,208 @@ class HHDApp(tk.Tk):
                     bd=1,
                     width=34,
                 )
-            control.grid(row=index, column=1, sticky="w", padx=10, pady=7)
+            control.grid(
+                row=row_index,
+                column=1,
+                sticky="w",
+                padx=10,
+                pady=7,
+            )
+
+        identity_frame = tk.Frame(
+            body,
+            bg=BLUE_PANEL,
+            highlightbackground=BORDER,
+            highlightthickness=1,
+        )
+        identity_frame.grid(
+            row=3,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            padx=10,
+            pady=8,
+        )
+        tk.Label(
+            identity_frame,
+            text="Treatment Lot and Equipment Information",
+            bg=PANEL_TITLE_BG,
+            fg=CYAN,
+            font=("Segoe UI", 11, "bold"),
+            anchor="w",
+            padx=10,
+            pady=7,
+        ).grid(row=0, column=0, columnspan=4, sticky="ew")
+
+        identity_vars = {
+            "pak_lot": tk.StringVar(
+                value=self.db.get_setting("last_pak_lot", "")
+            ),
+            "sak_lot": tk.StringVar(
+                value=self.db.get_setting("last_sak_lot", "")
+            ),
+            "cartridge_lot": tk.StringVar(
+                value=self.db.get_setting("last_cartridge_lot", "")
+            ),
+            "cycler_serial": tk.StringVar(
+                value=self.db.get_setting("last_cycler_serial", "")
+            ),
+            "pureflow_serial": tk.StringVar(
+                value=self.db.get_setting("last_pureflow_serial", "")
+            ),
+        }
+
+        identity_specs = [
+            ("PAK lot#", "pak_lot", 1, 0),
+            ("SAK lot#", "sak_lot", 1, 2),
+            ("Cartridge lot#", "cartridge_lot", 2, 0),
+            ("Cycler serial#", "cycler_serial", 2, 2),
+            ("PureFlow serial#", "pureflow_serial", 3, 0),
+        ]
+        identity_entries = []
+        for label, key, row_index, column_index in identity_specs:
+            tk.Label(
+                identity_frame,
+                text=label,
+                bg=BLUE_PANEL,
+                fg=TEXT,
+                anchor="w",
+            ).grid(
+                row=row_index,
+                column=column_index,
+                sticky="w",
+                padx=(10, 6),
+                pady=6,
+            )
+            entry = tk.Entry(
+                identity_frame,
+                textvariable=identity_vars[key],
+                bg=INPUT_BG,
+                fg=TEXT,
+                insertbackground=TEXT,
+                relief="solid",
+                bd=1,
+                width=28,
+            )
+            entry.grid(
+                row=row_index,
+                column=column_index + 1,
+                sticky="ew",
+                padx=(0, 12),
+                pady=6,
+            )
+            identity_entries.append(entry)
+
+        identity_frame.columnconfigure(1, weight=1)
+        identity_frame.columnconfigure(3, weight=1)
+
+        custom_frame = tk.Frame(
+            body,
+            bg=BLUE_PANEL,
+            highlightbackground=BORDER,
+            highlightthickness=1,
+        )
+        custom_frame.grid(
+            row=4,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            padx=10,
+            pady=8,
+        )
+        tk.Label(
+            custom_frame,
+            text="Incomplete Treatment — Actual Items Used",
+            bg=PANEL_TITLE_BG,
+            fg=CYAN,
+            font=("Segoe UI", 11, "bold"),
+            anchor="w",
+            padx=10,
+            pady=7,
+        ).pack(fill="x")
+
+        controls = tk.Frame(custom_frame, bg=BLUE_PANEL)
+        controls.pack(fill="x", padx=10, pady=8)
+
+        item_var = tk.StringVar()
+        units_var = tk.StringVar(value="0.5")
+        item_map = {
+            (
+                f"{self.group_display_name(item['group_name'])}"
+                f" — {item['item_name']}"
+            ): item["id"]
+            for item in self.db.items()
+        }
+
+        item_combo = ttk.Combobox(
+            controls,
+            textvariable=item_var,
+            values=list(item_map),
+            state="readonly",
+            width=48,
+        )
+        item_combo.pack(side="left", padx=(0, 8))
+
+        units_combo = ttk.Combobox(
+            controls,
+            textvariable=units_var,
+            values=[f"{value / 2:g}" for value in range(1, 21)],
+            state="readonly",
+            width=8,
+        )
+        units_combo.pack(side="left", padx=(0, 8))
+
+        usage_tree = ttk.Treeview(
+            custom_frame,
+            columns=("item", "units"),
+            show="headings",
+            height=4,
+        )
+        usage_tree.heading("item", text="Item")
+        usage_tree.heading("units", text="Units Used")
+        usage_tree.column("item", width=450, stretch=True)
+        usage_tree.column(
+            "units",
+            width=100,
+            anchor="center",
+            stretch=False,
+        )
+        usage_tree.pack(fill="x", padx=10, pady=(0, 8))
+        pending = []
+
+        def add_usage():
+            label = item_var.get()
+            if not label:
+                return
+            units = float(units_var.get())
+            pending.append((item_map[label], label, units))
+            usage_tree.insert(
+                "",
+                "end",
+                values=(label, f"{units:g}"),
+            )
+
+        def remove_usage():
+            selection = usage_tree.selection()
+            if not selection:
+                return
+            selected_index = usage_tree.index(selection[0])
+            usage_tree.delete(selection[0])
+            pending.pop(selected_index)
+
+        add_usage_button = self.button(
+            controls,
+            "Add Item Usage",
+            add_usage,
+        )
+        add_usage_button.pack(side="left", padx=(0, 8))
+
+        remove_usage_button = self.button(
+            controls,
+            "Remove Selected",
+            remove_usage,
+        )
+        remove_usage_button.pack(side="left")
 
         tk.Label(
             body,
@@ -2920,9 +3624,9 @@ class HHDApp(tk.Tk):
             bg=BLUE_PANEL,
             fg=TEXT,
             font=("Segoe UI", 10, "bold"),
-        ).grid(row=3, column=0, sticky="nw", padx=10, pady=7)
+        ).grid(row=5, column=0, sticky="nw", padx=10, pady=7)
 
-        treatment_notes = tk.Text(
+        notes = tk.Text(
             body,
             height=4,
             width=72,
@@ -2934,189 +3638,267 @@ class HHDApp(tk.Tk):
             bd=1,
             font=("Segoe UI", 10),
         )
-        treatment_notes.grid(row=3, column=1, sticky="ew", padx=10, pady=7)
+        notes.grid(
+            row=5,
+            column=1,
+            sticky="ew",
+            padx=10,
+            pady=7,
+        )
+
         body.columnconfigure(1, weight=1)
 
         tk.Label(
             body,
-            text="Equivalent: Regular/Extra = 1, Missed = 0, Incomplete = 0.5 or another decimal.",
+            text=(
+                "The most recently saved lot and equipment values are "
+                "automatically prefilled for the next treatment."
+            ),
             bg=BLUE_PANEL,
             fg=MUTED,
             font=("Segoe UI", 9),
-        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 8))
+        ).grid(
+            row=6,
+            column=0,
+            columnspan=2,
+            sticky="w",
+            padx=10,
+            pady=(0, 8),
+        )
 
-        def adjust_equivalent(*_args):
-            if type_var.get() == "Missed Treatment":
-                equiv_var.set("0")
-            elif type_var.get() == "Incomplete Treatment":
-                equiv_var.set("0.5")
-            else:
-                equiv_var.set("1")
+        def adjust(*_):
+            treatment_type = type_var.get()
+            incomplete = treatment_type == "Incomplete Treatment"
+            missed = treatment_type == "Missed Treatment"
 
-        type_var.trace_add("write", adjust_equivalent)
+            equiv_var.set(
+                "0.5" if incomplete else ("0" if missed else "1")
+            )
+
+            item_combo.configure(
+                state="readonly" if incomplete else "disabled"
+            )
+            units_combo.configure(
+                state="readonly" if incomplete else "disabled"
+            )
+            add_usage_button.configure(
+                state="normal" if incomplete else "disabled"
+            )
+            remove_usage_button.configure(
+                state="normal" if incomplete else "disabled"
+            )
+
+            for entry in identity_entries:
+                entry.configure(
+                    state="disabled" if missed else "normal"
+                )
+
+        type_var.trace_add("write", adjust)
+        adjust()
 
         def save_treatment():
             try:
+                session_type = type_var.get()
                 equivalent = float(equiv_var.get())
-                if equivalent < 0:
-                    raise ValueError("Treatment equivalent cannot be negative.")
-                notes = treatment_notes.get("1.0", "end-1c").strip()
-                self.db.add_session(
+
+                if "Incomplete" in session_type and not pending:
+                    raise ValueError(
+                        "Add at least one item used during the "
+                        "incomplete treatment."
+                    )
+
+                session_id = self.db.add_session(
                     parse_date(date_var.get()).isoformat(),
-                    type_var.get(),
+                    session_type,
                     equivalent,
-                    notes,
+                    notes.get("1.0", "end-1c").strip(),
+                    pak_lot=identity_vars["pak_lot"].get(),
+                    sak_lot=identity_vars["sak_lot"].get(),
+                    cartridge_lot=identity_vars["cartridge_lot"].get(),
+                    cycler_serial=identity_vars["cycler_serial"].get(),
+                    pureflow_serial=identity_vars["pureflow_serial"].get(),
                 )
+
+                if "Incomplete" in session_type:
+                    for item_id, _label, units in pending:
+                        self.db.add_session_item_usage(
+                            session_id,
+                            item_id,
+                            units,
+                        )
+
                 self.db.backup_database("change")
-                treatment_notes.delete("1.0", "end")
                 self.show_log_session()
             except Exception as ex:
-                messagebox.showerror(
+                self.themed_dialog(
                     APP_NAME,
                     f"Could not save treatment:\n{ex}",
+                    [("Close", None)],
+                    width=540,
+                    height=250,
                 )
 
         self.button(
-            body, "Submit Treatment", save_treatment
-        ).grid(row=5, column=1, sticky="w", padx=10, pady=12)
+            body,
+            "Submit Treatment",
+            save_treatment,
+        ).grid(row=7, column=1, sticky="w", padx=10, pady=12)
 
-        history_panel, history_body = self.make_panel(
-            self.content, "Treatment History"
-        )
-        history_panel.pack(fill="both", expand=True, padx=16, pady=(0, 16))
 
-        tree_frame = tk.Frame(history_body, bg=BLUE_PANEL)
-        tree_frame.pack(fill="both", expand=True)
-
-        self.style.configure(
-            "TreatmentHistory.Treeview",
-            background=BLUE_PANEL,
-            foreground=TEXT,
-            fieldbackground=BLUE_PANEL,
-            rowheight=36,
-            font=("Segoe UI", 12),
-        )
-        self.style.configure(
-            "TreatmentHistory.Treeview.Heading",
-            background=BLUE_HEADER,
-            foreground=TEXT,
-            font=("Segoe UI", 12, "bold"),
-        )
-        self.style.map(
-            "TreatmentHistory.Treeview",
-            background=[("selected", SELECT_BG)],
-            foreground=[("selected", "white")],
-        )
-
-        treatment_tree = ttk.Treeview(
-            tree_frame,
-            columns=("date", "type"),
-            show="headings",
-            height=8,
-            style="TreatmentHistory.Treeview",
-        )
-        for column, heading, width in [
-            ("date", "Date", 160),
-            ("type", "Treatment Type", 360),
-        ]:
-            treatment_tree.heading(column, text=heading)
-            treatment_tree.column(
-                column,
-                width=width,
-                stretch=True,
-                anchor="w",
-            )
-        treatment_tree.pack(fill="both", expand=True)
-        self.attach_responsive_tree(
-            treatment_tree,
-            font_size=12,
-            min_widths={"date": 120, "type": 200},
-            stretch_columns=["type"],
-        )
-
-        notes_header = tk.Frame(history_body, bg=BLUE_PANEL)
-        notes_header.pack(fill="x", pady=(10, 5))
+    def show_treatment_history(self):
+        self.clear_content()
         tk.Label(
-            notes_header,
-            text="Treatment Notes:",
-            bg=BLUE_PANEL,
+            self.content,
+            text="Treatment History",
+            bg=BLUE_BG,
             fg=CYAN,
-            font=("Segoe UI", 13, "bold"),
+            font=("Segoe UI", 17, "bold"),
+        ).pack(anchor="w", padx=16, pady=12)
+
+        panel, body = self.make_panel(
+            self.content,
+            "Recorded Treatments",
+        )
+        panel.pack(
+            fill="both",
+            expand=True,
+            padx=16,
+            pady=(0, 16),
+        )
+
+        toolbar = tk.Frame(body, bg=BLUE_PANEL)
+        toolbar.pack(fill="x", pady=(0, 10))
+
+        tk.Label(
+            toolbar,
+            text=(
+                "Select a treatment and edit its notes, or double-click "
+                "any row."
+            ),
+            bg=BLUE_PANEL,
+            fg=MUTED,
+            font=("Segoe UI", 10),
         ).pack(side="left")
 
-        selected_session_id = {"value": None}
+        table_frame = tk.Frame(body, bg=BLUE_PANEL)
+        table_frame.pack(fill="both", expand=True)
 
-        notes_reader = tk.Text(
-            history_body,
-            height=6,
-            wrap="word",
-            bg=CHART_BG,
-            fg=TEXT,
-            insertbackground=TEXT,
-            relief="solid",
-            bd=1,
-            font=("Segoe UI", 12),
-            state="disabled",
+        columns = (
+            "date",
+            "type",
+            "pak",
+            "sak",
+            "cartridge",
+            "cycler",
+            "pureflow",
+            "notes",
         )
-        notes_reader.pack(fill="x")
+        tree = ttk.Treeview(
+            table_frame,
+            columns=columns,
+            show="headings",
+            height=18,
+        )
 
-        edit_button = self.button(notes_header, "Edit", lambda: None)
-        save_button = self.button(notes_header, "Save Notes", lambda: None)
-        save_button.config(state="disabled")
-        save_button.pack(side="right", padx=(6, 0))
-        edit_button.pack(side="right")
+        headings = [
+            ("date", "Date", 105),
+            ("type", "Treatment Type", 155),
+            ("pak", "PAK Lot#", 125),
+            ("sak", "SAK Lot#", 125),
+            ("cartridge", "Cartridge Lot#", 140),
+            ("cycler", "Cycler Serial#", 135),
+            ("pureflow", "PureFlow Serial#", 145),
+            ("notes", "Notes / Incomplete Item Usage", 360),
+        ]
+        for column, title, width in headings:
+            tree.heading(column, text=title)
+            tree.column(
+                column,
+                width=width,
+                minwidth=80,
+                stretch=column == "notes",
+                anchor="w",
+            )
 
-        def show_selected_notes(_event=None):
-            selection = treatment_tree.selection()
-            if not selection:
-                selected_session_id["value"] = None
-                text = ""
-            else:
-                selected_session_id["value"] = int(selection[0])
-                record = self.db.session_by_id(selected_session_id["value"])
-                text = (record["notes"] or "") if record else ""
+        vertical_scroll = ttk.Scrollbar(
+            table_frame,
+            orient="vertical",
+            command=tree.yview,
+        )
+        horizontal_scroll = ttk.Scrollbar(
+            table_frame,
+            orient="horizontal",
+            command=tree.xview,
+        )
+        tree.configure(
+            yscrollcommand=vertical_scroll.set,
+            xscrollcommand=horizontal_scroll.set,
+        )
 
-            notes_reader.config(state="normal")
-            notes_reader.delete("1.0", "end")
-            notes_reader.insert("1.0", text)
-            notes_reader.config(state="disabled")
-            edit_button.config(state="normal" if selection else "disabled")
-            save_button.config(state="disabled")
+        tree.grid(row=0, column=0, sticky="nsew")
+        vertical_scroll.grid(row=0, column=1, sticky="ns")
+        horizontal_scroll.grid(row=1, column=0, sticky="ew")
+        table_frame.rowconfigure(0, weight=1)
+        table_frame.columnconfigure(0, weight=1)
 
-        def edit_selected_notes():
-            if selected_session_id["value"] is None:
-                return
-            notes_reader.config(state="normal")
-            notes_reader.focus_set()
-            save_button.config(state="normal")
-            edit_button.config(state="disabled")
-
-        def save_selected_notes():
-            session_id = selected_session_id["value"]
-            if session_id is None:
-                return
-            notes = notes_reader.get("1.0", "end-1c").strip()
-            self.db.update_session_notes(session_id, notes)
-            self.db.backup_database("change")
-            notes_reader.config(state="disabled")
-            save_button.config(state="disabled")
-            edit_button.config(state="normal")
-
-        edit_button.config(command=edit_selected_notes, state="disabled")
-        save_button.config(command=save_selected_notes)
-
-        treatment_tree.bind("<<TreeviewSelect>>", show_selected_notes)
-
-        for record in self.db.recent_sessions(100):
-            treatment_tree.insert(
+        for record in self.db.recent_sessions(5000):
+            usage = ", ".join(
+                f"{item_usage['item_name']}: "
+                f"{float(item_usage['units_used']):g}"
+                for item_usage in self.db.session_item_usages(
+                    record["id"]
+                )
+            )
+            notes_and_usage = "; ".join(
+                value
+                for value in [
+                    (record["notes"] or "").strip(),
+                    f"Items used: {usage}" if usage else "",
+                ]
+                if value
+            )
+            tree.insert(
                 "",
                 "end",
                 iid=str(record["id"]),
                 values=(
                     record["session_date"],
                     record["session_type"],
+                    record["pak_lot"] or "",
+                    record["sak_lot"] or "",
+                    record["cartridge_lot"] or "",
+                    record["cycler_serial"] or "",
+                    record["pureflow_serial"] or "",
+                    notes_and_usage,
                 ),
             )
+
+        def edit_selected_notes():
+            selection = tree.selection()
+            if not selection:
+                self.themed_dialog(
+                    APP_NAME,
+                    "Select a treatment from Treatment History first.",
+                    [("Close", None)],
+                    width=470,
+                    height=220,
+                )
+                return
+            self.edit_treatment_notes_dialog(
+                int(selection[0]),
+                return_to_history=True,
+            )
+
+        self.button(
+            toolbar,
+            "Edit Selected Treatment Notes",
+            edit_selected_notes,
+        ).pack(side="right")
+
+        tree.bind(
+            "<Double-1>",
+            lambda _event: edit_selected_notes(),
+        )
 
     def show_settings(self):
         self.clear_content()
