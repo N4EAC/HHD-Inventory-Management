@@ -26,7 +26,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
 APP_NAME = "HHD Inventory Manager"
-APP_VERSION = "1.2.3"
+APP_VERSION = "1.2.5"
 DB_NAME = "hhd_inventory.db"
 SETTINGS_FILE = "hhd_inventory_settings.json"
 APP_FOLDER_NAME = "HHD Inventory Manager"
@@ -126,6 +126,31 @@ THEMES = {
         "selected_text": "#FFFFFF",
         "blue_button_text": "#FFFFFF",
         "dark_titlebar": False,
+    },
+    "Red Shadow": {
+        "bg": "#160A0D",
+        "panel": "#251014",
+        "panel2": "#32151B",
+        "header": "#7A101D",
+        "accent": "#FF6677",
+        "text": "#FFF4F5",
+        "muted": "#D7A8AE",
+        "green": "#62D985",
+        "yellow": "#FFD65A",
+        "red": "#FF5266",
+        "border": "#A92A3A",
+        "input": "#1C0C10",
+        "button": "#8C1827",
+        "button_hover": "#B3263A",
+        "panel_title": "#100609",
+        "status": "#0A0305",
+        "chart": "#12070A",
+        "select": "#A61D31",
+        "calendar_empty": "#2A1116",
+        "header_text": "#FFFFFF",
+        "selected_text": "#FFFFFF",
+        "blue_button_text": "#FFFFFF",
+        "dark_titlebar": True,
     },
     "Cyberpunk": {
         "bg": "#090B14",
@@ -2462,27 +2487,101 @@ class HHDApp(tk.Tk):
         win = tk.Toplevel(self)
         win.overrideredirect(True)
         win.configure(bg=BORDER)
-        width = 560
-        height = min(620, 170 + len(treatments) * 150)
-        self.update_idletasks()
-        x = self.winfo_rootx() + max(0, (self.winfo_width() - width) // 2)
-        y = self.winfo_rooty() + max(0, (self.winfo_height() - height) // 2)
-        win.geometry(f"{width}x{height}+{x}+{y}")
         win.transient(self)
-        win.grab_set()
-        outer = tk.Frame(win, bg=BLUE_BG, highlightbackground=BORDER, highlightthickness=2)
+
+        outer = tk.Frame(
+            win,
+            bg=BLUE_BG,
+            highlightbackground=BORDER,
+            highlightthickness=2,
+        )
         outer.pack(fill="both", expand=True, padx=2, pady=2)
-        tk.Label(outer, text=day_value.strftime("%A, %B %d, %Y"), bg=BLUE_HEADER,
-                 fg=HEADER_TEXT, font=("Segoe UI", 15, "bold"), pady=12).pack(fill="x")
-        body = tk.Frame(outer, bg=BLUE_PANEL)
-        body.pack(fill="both", expand=True, padx=14, pady=14)
-        colors = {"complete": GREEN, "incomplete": YELLOW, "missed": RED}
+
+        tk.Label(
+            outer,
+            text=day_value.strftime("%A, %B %d, %Y"),
+            bg=BLUE_HEADER,
+            fg=HEADER_TEXT,
+            font=("Segoe UI", 15, "bold"),
+            pady=12,
+        ).pack(fill="x")
+
+        footer = tk.Frame(outer, bg=BLUE_PANEL)
+        footer.pack(side="bottom", fill="x", padx=14, pady=(0, 14))
+
+        content_shell = tk.Frame(outer, bg=BLUE_PANEL)
+        content_shell.pack(
+            side="top",
+            fill="both",
+            expand=True,
+            padx=14,
+            pady=(14, 10),
+        )
+
+        canvas = tk.Canvas(
+            content_shell,
+            bg=BLUE_PANEL,
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        scrollbar = ttk.Scrollbar(
+            content_shell,
+            orient="vertical",
+            command=canvas.yview,
+        )
+        body = tk.Frame(canvas, bg=BLUE_PANEL)
+
+        body_window = canvas.create_window(
+            (0, 0),
+            window=body,
+            anchor="nw",
+        )
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        def update_scroll_region(_event=None):
+            bbox = canvas.bbox("all")
+            if bbox:
+                canvas.configure(scrollregion=bbox)
+
+        def fit_body_width(event):
+            canvas.itemconfigure(body_window, width=event.width)
+
+        body.bind("<Configure>", update_scroll_region)
+        canvas.bind("<Configure>", fit_body_width)
+
+        colors = {
+            "complete": GREEN,
+            "incomplete": YELLOW,
+            "missed": RED,
+        }
+
         for treatment in treatments:
             color = colors[treatment["status"]]
-            card = tk.Frame(body, bg=BLUE_PANEL_2, highlightbackground=color, highlightthickness=2)
+            card = tk.Frame(
+                body,
+                bg=BLUE_PANEL_2,
+                highlightbackground=color,
+                highlightthickness=2,
+            )
             card.pack(fill="x", pady=(0, 10))
-            tk.Label(card, text=treatment["type"], bg=color, fg="#111111",
-                     font=("Segoe UI", 11, "bold"), padx=10, pady=6).pack(fill="x")
+
+            card_text_color = "#111111"
+            if treatment["status"] == "missed":
+                card_text_color = "#FFFFFF"
+
+            tk.Label(
+                card,
+                text=treatment["type"],
+                bg=color,
+                fg=card_text_color,
+                font=("Segoe UI", 11, "bold"),
+                padx=10,
+                pady=6,
+            ).pack(fill="x")
+
             details = []
             record = treatment.get("record", {})
             identity_lines = [
@@ -2513,6 +2612,7 @@ class HHDApp(tk.Tk):
                 ),
             ]
             identity_lines = [line for line in identity_lines if line]
+
             if identity_lines:
                 details.append("Lot and equipment information:")
                 details.extend(f"• {line}" for line in identity_lines)
@@ -2522,28 +2622,103 @@ class HHDApp(tk.Tk):
                     details.append("")
                 details.append("Items used:")
                 details.extend(
-                    f"• {u['item_name']}: {float(u['units_used']):g}"
-                    for u in treatment["usages"]
+                    f"• {usage['item_name']}: "
+                    f"{float(usage['units_used']):g}"
+                    for usage in treatment["usages"]
                 )
 
             if treatment["notes"]:
-                details.append(
-                    ("\n" if details else "")
-                    + "Notes: "
-                    + treatment["notes"]
-                )
+                if details:
+                    details.append("")
+                details.append("Notes:")
+                details.append(treatment["notes"])
 
             if not details:
                 details = [
                     "No notes, item usage, or lot information recorded."
                 ]
-            tk.Label(card, text="\n".join(details), bg=BLUE_PANEL_2, fg=TEXT,
-                     justify="left", anchor="w", wraplength=490, padx=12, pady=10).pack(fill="x")
-        ok_button = self.button(body, "OK", win.destroy)
+
+            tk.Label(
+                card,
+                text="\n".join(details),
+                bg=BLUE_PANEL_2,
+                fg=TEXT,
+                justify="left",
+                anchor="nw",
+                wraplength=620,
+                padx=12,
+                pady=10,
+            ).pack(fill="x")
+
+        def close_dialog():
+            try:
+                win.grab_release()
+            except tk.TclError:
+                pass
+            win.destroy()
+
+        ok_button = self.button(footer, "OK", close_dialog)
         ok_button.configure(width=12)
-        ok_button.pack(anchor="e", pady=(2, 0))
-        win.bind("<Escape>", lambda _e: win.destroy())
+        ok_button.pack(side="right")
+
+        def scroll_dialog(event):
+            if event.delta:
+                canvas.yview_scroll(
+                    -1 * int(event.delta / 120),
+                    "units",
+                )
+
+        canvas.bind("<MouseWheel>", scroll_dialog)
+        body.bind("<MouseWheel>", scroll_dialog)
+
+        # Build the window fully before applying geometry or acquiring
+        # the modal grab. This avoids the previous UI freeze.
+        win.update_idletasks()
+
+        screen_width = win.winfo_screenwidth()
+        screen_height = win.winfo_screenheight()
+
+        width = min(740, max(620, screen_width - 120))
+        max_height = max(440, int(screen_height * 0.80))
+
+        natural_height = (
+            outer.winfo_reqheight()
+            + body.winfo_reqheight()
+            + 30
+        )
+        height = min(max(440, natural_height), max_height)
+
+        self.update_idletasks()
+        x = self.winfo_rootx() + max(
+            0,
+            (self.winfo_width() - width) // 2,
+        )
+        y = self.winfo_rooty() + max(
+            0,
+            (self.winfo_height() - height) // 2,
+        )
+
+        x = min(max(20, x), max(20, screen_width - width - 20))
+        y = min(max(20, y), max(20, screen_height - height - 40))
+
+        win.geometry(f"{width}x{height}+{x}+{y}")
+        win.deiconify()
+        win.lift()
         win.focus_force()
+
+        # Delay the grab until the dialog is visible and fully realized.
+        def activate_modal():
+            if not win.winfo_exists():
+                return
+            try:
+                win.grab_set()
+            except tk.TclError:
+                pass
+
+        win.after(50, activate_modal)
+
+        win.bind("<Escape>", lambda _event: close_dialog())
+        win.protocol("WM_DELETE_WINDOW", close_dialog)
 
     def show_lot_number_search(self):
         self.clear_content()
