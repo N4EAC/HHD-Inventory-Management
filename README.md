@@ -26,3 +26,11 @@ HHD Inventory Manager was created to help home hemodialysis patients and caregiv
 - Create and restore backups.
 - Remember application settings, window size, and position.
 - Select from multiple visual themes, including Medical Blue, Beige, Dark, Gray 95, Red Shadow, and Cyberpunk.
+
+**Screenshots**
+
+<img width="1584" height="988" alt="image" src="https://github.com/user-attachments/assets/17d5676f-2a62-4fbc-bd65-c4dc664a94fc" />
+<img width="1584" height="988" alt="image" src="https://github.com/user-attachments/assets/55356dbd-af7f-4bf1-b96b-223438995b79" />
+<img width="1584" height="988" alt="image" src="https://github.com/user-attachments/assets/06777462-2b3c-4ce3-85d9-907d42597010" />
+
+
