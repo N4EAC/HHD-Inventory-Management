@@ -26,7 +26,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
 APP_NAME = "HHD Inventory Manager"
-APP_VERSION = "1.2.5"
+APP_VERSION = "1.3.0"
 DB_NAME = "hhd_inventory.db"
 SETTINGS_FILE = "hhd_inventory_settings.json"
 APP_FOLDER_NAME = "HHD Inventory Manager"
@@ -316,54 +316,41 @@ def _rgb_to_colorref(hex_color):
     b = int(hex_color[4:6], 16)
     return r | (g << 8) | (b << 16)
 
-def request_windows_titlebar(hwnd, caption_color, text_color, border_color, dark_mode=True):
-    """
-    Ask Windows 11 DWM to use the app's medical-blue title bar colors.
-
-    This keeps the normal native Windows title bar, which preserves taskbar icon
-    reliability, while requesting colors that match the GUI.
-    """
+def request_windows_titlebar(hwnd, caption_color=None, text_color=None, border_color=None, dark_mode=None):
+    """Apply the current Windows 10/11 application title-bar theme."""
+    if os.name != "nt":
+        return
     try:
-        # Windows 11 DWM attributes.
-        DWMWA_USE_IMMERSIVE_DARK_MODE = 20
-        DWMWA_CAPTION_COLOR = 35
-        DWMWA_TEXT_COLOR = 36
-        DWMWA_BORDER_COLOR = 34
+        import winreg
+        key_path = (
+            r"Software\Microsoft\Windows\CurrentVersion"
+            r"\Themes\Personalize"
+        )
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+            apps_use_light, _ = winreg.QueryValueEx(
+                key, "AppsUseLightTheme"
+            )
+        use_dark = ctypes.c_int(0 if apps_use_light else 1)
 
-        dark = ctypes.c_int(1 if dark_mode else 0)
-        caption = ctypes.c_int(_rgb_to_colorref(caption_color))
-        text = ctypes.c_int(_rgb_to_colorref(text_color))
-        border = ctypes.c_int(_rgb_to_colorref(border_color))
+        # Tk's winfo_id can identify the client window; use its native
+        # parent when available so DWM styles the actual title bar.
+        native_hwnd = ctypes.windll.user32.GetParent(hwnd) or hwnd
+        for attribute in (20, 19):
+            result = ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                ctypes.wintypes.HWND(native_hwnd),
+                ctypes.c_int(attribute),
+                ctypes.byref(use_dark),
+                ctypes.sizeof(use_dark),
+            )
+            if result == 0:
+                break
 
-        ctypes.windll.dwmapi.DwmSetWindowAttribute(
-            ctypes.wintypes.HWND(hwnd),
-            ctypes.c_int(DWMWA_USE_IMMERSIVE_DARK_MODE),
-            ctypes.byref(dark),
-            ctypes.sizeof(dark)
-        )
-        ctypes.windll.dwmapi.DwmSetWindowAttribute(
-            ctypes.wintypes.HWND(hwnd),
-            ctypes.c_int(DWMWA_CAPTION_COLOR),
-            ctypes.byref(caption),
-            ctypes.sizeof(caption)
-        )
-        ctypes.windll.dwmapi.DwmSetWindowAttribute(
-            ctypes.wintypes.HWND(hwnd),
-            ctypes.c_int(DWMWA_TEXT_COLOR),
-            ctypes.byref(text),
-            ctypes.sizeof(text)
-        )
-        ctypes.windll.dwmapi.DwmSetWindowAttribute(
-            ctypes.wintypes.HWND(hwnd),
-            ctypes.c_int(DWMWA_BORDER_COLOR),
-            ctypes.byref(border),
-            ctypes.sizeof(border)
+        flags = 0x0020 | 0x0001 | 0x0002 | 0x0004
+        ctypes.windll.user32.SetWindowPos(
+            native_hwnd, 0, 0, 0, 0, 0, flags
         )
     except Exception:
-        # Older Windows/Tk builds may ignore custom caption color. Leave native title bar.
         pass
-
-
 
 def iso_today():
     return date.today().isoformat()
@@ -846,6 +833,40 @@ class InventoryDB:
         )
         self.conn.commit()
 
+    def delete_session(self, session_id):
+        """
+        Delete one treatment and its saved item-usage rows atomically.
+
+        Inventory is calculated from session_log and session_item_usage.
+        Removing these records restores the units deducted by the selected
+        treatment. For incomplete treatments, each exact units_used value
+        recorded for that treatment is removed.
+        """
+        record = self.session_by_id(session_id)
+        if not record:
+            raise ValueError("The selected treatment no longer exists.")
+
+        usages = self.session_item_usages(session_id)
+
+        try:
+            self.conn.execute("BEGIN")
+            self.conn.execute(
+                "DELETE FROM session_item_usage WHERE session_id=?",
+                (session_id,),
+            )
+            cursor = self.conn.execute(
+                "DELETE FROM session_log WHERE id=?",
+                (session_id,),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("The treatment could not be deleted.")
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+        return record, usages
+
     def received_sum(self, item_id, since_date):
         row = self.conn.execute(
             "SELECT COALESCE(SUM(units),0) AS total FROM received_inventory WHERE item_id=? AND received_date>=?",
@@ -1219,6 +1240,10 @@ class HHDApp(tk.Tk):
         self.schedule_clock_update()
         self.schedule_auto_backup()
         self.after(600, self.blink_status_leds)
+        self.after(
+            150,
+            lambda: request_windows_titlebar(self.winfo_id()),
+        )
 
     def set_app_icon(self):
         """Set the Windows taskbar/Alt-Tab/window icon as reliably as Tk allows."""
@@ -1707,6 +1732,10 @@ class HHDApp(tk.Tk):
             self.theme_palette.get("dark_titlebar", True),
         )
         self.save_local_settings()
+        self.after(
+            75,
+            lambda: request_windows_titlebar(self.winfo_id()),
+        )
 
         if rebuild and hasattr(self, "sidebar"):
             for widget in self.sidebar.winfo_children():
@@ -2539,7 +2568,6 @@ class HHDApp(tk.Tk):
         canvas.configure(yscrollcommand=scrollbar.set)
 
         canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
 
         def update_scroll_region(_event=None):
             bbox = canvas.bbox("all")
@@ -2574,7 +2602,7 @@ class HHDApp(tk.Tk):
 
             tk.Label(
                 card,
-                text=treatment["type"],
+                text=self.display_treatment_type(treatment["type"]),
                 bg=color,
                 fg=card_text_color,
                 font=("Segoe UI", 11, "bold"),
@@ -2661,7 +2689,11 @@ class HHDApp(tk.Tk):
         ok_button.configure(width=12)
         ok_button.pack(side="right")
 
+        scrolling_enabled = {"value": False}
+
         def scroll_dialog(event):
+            if not scrolling_enabled["value"]:
+                return
             if event.delta:
                 canvas.yview_scroll(
                     -1 * int(event.delta / 120),
@@ -2678,17 +2710,31 @@ class HHDApp(tk.Tk):
         screen_width = win.winfo_screenwidth()
         screen_height = win.winfo_screenheight()
 
-        width = min(740, max(620, screen_width - 120))
-        max_height = max(440, int(screen_height * 0.80))
-
-        natural_height = (
-            outer.winfo_reqheight()
-            + body.winfo_reqheight()
-            + 30
-        )
-        height = min(max(440, natural_height), max_height)
-
         self.update_idletasks()
+
+        main_width = max(620, self.winfo_width())
+        main_height = max(420, self.winfo_height())
+
+        # Keep the dialog comfortably inside the main application window.
+        # Width remains stable, while height follows the actual content.
+        width = min(740, max(620, main_width - 80))
+        max_height = max(360, main_height - 80)
+
+        header_height = outer.winfo_reqheight() - body.winfo_reqheight()
+        natural_height = max(
+            300,
+            header_height + body.winfo_reqheight() + 20,
+        )
+
+        scrolling_enabled["value"] = natural_height > max_height
+
+        if scrolling_enabled["value"]:
+            scrollbar.pack(side="right", fill="y")
+            height = max_height
+        else:
+            # No unnecessary empty vertical space for short content.
+            height = natural_height
+
         x = self.winfo_rootx() + max(
             0,
             (self.winfo_width() - width) // 2,
@@ -2698,8 +2744,18 @@ class HHDApp(tk.Tk):
             (self.winfo_height() - height) // 2,
         )
 
-        x = min(max(20, x), max(20, screen_width - width - 20))
-        y = min(max(20, y), max(20, screen_height - height - 40))
+        # Keep the dialog within both the main window and the visible screen.
+        max_x = min(
+            self.winfo_rootx() + self.winfo_width() - width - 20,
+            screen_width - width - 20,
+        )
+        max_y = min(
+            self.winfo_rooty() + self.winfo_height() - height - 20,
+            screen_height - height - 40,
+        )
+
+        x = min(max(self.winfo_rootx() + 20, x), max_x)
+        y = min(max(self.winfo_rooty() + 20, y), max_y)
 
         win.geometry(f"{width}x{height}+{x}+{y}")
         win.deiconify()
@@ -2913,7 +2969,7 @@ class HHDApp(tk.Tk):
 
         tk.Label(
             body,
-            text=f"{record['session_date']} — {record['session_type']}",
+            text=f"{record['session_date']} — {self.display_treatment_type(record['session_type'])}",
             bg=BLUE_PANEL,
             fg=CYAN,
             font=("Segoe UI", 11, "bold"),
@@ -2949,9 +3005,29 @@ class HHDApp(tk.Tk):
 
         def save_notes():
             try:
+                entered_note = notes_box.get(
+                    "1.0", "end-1c"
+                ).strip()
+                original_note = (record["notes"] or "").strip()
+
+                # The editor initially contains the existing note history.
+                # Only timestamp newly added or changed text.
+                if entered_note == original_note:
+                    saved_note = original_note
+                elif entered_note.startswith(original_note) and original_note:
+                    addition = entered_note[len(original_note):].strip()
+                    stamped = self.timestamp_note_entry(addition)
+                    saved_note = (
+                        original_note
+                        + ("\n\n" + stamped if stamped else "")
+                    )
+                else:
+                    stamped = self.timestamp_note_entry(entered_note)
+                    saved_note = stamped
+
                 self.db.update_session_notes(
                     session_id,
-                    notes_box.get("1.0", "end-1c").strip(),
+                    saved_note,
                 )
                 self.db.backup_database("change")
                 win.destroy()
@@ -3528,6 +3604,95 @@ class HHDApp(tk.Tk):
         for r in self.db.recent_received(50):
             tree.insert("", "end", values=(r["received_date"], self.group_display_name(r["group_name"]), r["item_name"], r["units"], r["notes"] or ""))
 
+    def show_treatment_saved_dialog(self):
+        win = tk.Toplevel(self)
+        win.title("Treatment Saved")
+        win.transient(self)
+        win.resizable(False, False)
+        win.configure(bg=BLUE_BG)
+
+        outer = tk.Frame(
+            win,
+            bg=BLUE_PANEL,
+            highlightbackground=BORDER,
+            highlightthickness=1,
+        )
+        outer.pack(fill="both", expand=True, padx=1, pady=1)
+
+        tk.Label(
+            outer,
+            text="Treatment Saved",
+            bg=BLUE_HEADER,
+            fg=HEADER_TEXT,
+            font=("Segoe UI", 14, "bold"),
+            padx=20,
+            pady=14,
+            anchor="w",
+        ).pack(fill="x")
+
+        tk.Label(
+            outer,
+            text="The treatment has been successfully recorded.",
+            bg=BLUE_PANEL,
+            fg=TEXT,
+            font=("Segoe UI", 11),
+            padx=26,
+            pady=24,
+        ).pack(fill="x")
+
+        button_row = tk.Frame(outer, bg=BLUE_PANEL)
+        button_row.pack(fill="x", padx=20, pady=(0, 18))
+
+        def close_dialog():
+            try:
+                win.grab_release()
+            except tk.TclError:
+                pass
+            win.destroy()
+
+        close_button = self.button(button_row, "CLOSE", close_dialog)
+        close_button.configure(width=12)
+        close_button.pack(anchor="center")
+
+        win.update_idletasks()
+        width = 430
+        height = max(205, win.winfo_reqheight())
+
+        self.update_idletasks()
+        x = self.winfo_rootx() + max(
+            0,
+            (self.winfo_width() - width) // 2,
+        )
+        y = self.winfo_rooty() + max(
+            0,
+            (self.winfo_height() - height) // 2,
+        )
+        win.geometry(f"{width}x{height}+{x}+{y}")
+
+        win.lift()
+        win.focus_force()
+        win.after(40, lambda: win.grab_set() if win.winfo_exists() else None)
+        win.bind("<Escape>", lambda _event: close_dialog())
+        win.protocol("WM_DELETE_WINDOW", close_dialog)
+
+
+    def display_treatment_type(self, session_type):
+        if session_type == "Regular Treatment":
+            return "Complete Treatment"
+        return session_type
+
+    def timestamp_note_entry(self, text):
+        text = (text or "").strip()
+        if not text:
+            return ""
+        local_now = datetime.now().astimezone()
+        return (
+            "Entry: "
+            + local_now.strftime("%Y-%m-%d %I:%M %p %Z")
+            + "\n"
+            + text
+        )
+
     def show_log_session(self):
         self.clear_content()
         tk.Label(
@@ -3542,7 +3707,7 @@ class HHDApp(tk.Tk):
         panel.pack(fill="x", padx=16, pady=(0, 12))
 
         date_var = tk.StringVar(value=iso_today())
-        type_var = tk.StringVar(value="Regular Treatment")
+        type_var = tk.StringVar(value="Complete Treatment")
         equiv_var = tk.StringVar(value="1")
 
         basic_fields = [
@@ -3571,7 +3736,7 @@ class HHDApp(tk.Tk):
                     body,
                     textvariable=variable,
                     values=[
-                        "Regular Treatment",
+                        "Complete Treatment",
                         "Extra Treatment",
                         "Missed Treatment",
                         "Incomplete Treatment",
@@ -3874,6 +4039,11 @@ class HHDApp(tk.Tk):
         def save_treatment():
             try:
                 session_type = type_var.get()
+                stored_session_type = (
+                    "Regular Treatment"
+                    if session_type == "Complete Treatment"
+                    else session_type
+                )
                 equivalent = float(equiv_var.get())
 
                 if "Incomplete" in session_type and not pending:
@@ -3884,9 +4054,11 @@ class HHDApp(tk.Tk):
 
                 session_id = self.db.add_session(
                     parse_date(date_var.get()).isoformat(),
-                    session_type,
+                    stored_session_type,
                     equivalent,
-                    notes.get("1.0", "end-1c").strip(),
+                    self.timestamp_note_entry(
+                        notes.get("1.0", "end-1c")
+                    ),
                     pak_lot=identity_vars["pak_lot"].get(),
                     sak_lot=identity_vars["sak_lot"].get(),
                     cartridge_lot=identity_vars["cartridge_lot"].get(),
@@ -3904,6 +4076,7 @@ class HHDApp(tk.Tk):
 
                 self.db.backup_database("change")
                 self.show_log_session()
+                self.after(50, self.show_treatment_saved_dialog)
             except Exception as ex:
                 self.themed_dialog(
                     APP_NAME,
@@ -3947,8 +4120,8 @@ class HHDApp(tk.Tk):
         tk.Label(
             toolbar,
             text=(
-                "Select a treatment and edit its notes, or double-click "
-                "any row."
+                "Select a treatment to edit its notes or delete it. "
+                "Double-click a row to edit notes."
             ),
             bg=BLUE_PANEL,
             fg=MUTED,
@@ -4038,7 +4211,9 @@ class HHDApp(tk.Tk):
                 iid=str(record["id"]),
                 values=(
                     record["session_date"],
-                    record["session_type"],
+                    self.display_treatment_type(
+                        record["session_type"]
+                    ),
                     record["pak_lot"] or "",
                     record["sak_lot"] or "",
                     record["cartridge_lot"] or "",
@@ -4064,11 +4239,116 @@ class HHDApp(tk.Tk):
                 return_to_history=True,
             )
 
+        def delete_selected_treatment():
+            selection = tree.selection()
+            if not selection:
+                self.themed_dialog(
+                    APP_NAME,
+                    "Select a treatment from Treatment History first.",
+                    [("CLOSE", None)],
+                    width=470,
+                    height=220,
+                )
+                return
+
+            session_id = int(selection[0])
+            record = self.db.session_by_id(session_id)
+            if not record:
+                self.themed_dialog(
+                    APP_NAME,
+                    "The selected treatment no longer exists.",
+                    [("CLOSE", None)],
+                    width=470,
+                    height=220,
+                )
+                self.show_treatment_history()
+                return
+
+            usages = self.db.session_item_usages(session_id)
+            treatment_name = self.display_treatment_type(
+                record["session_type"]
+            )
+
+            if usages:
+                restored_lines = [
+                    f"• {usage['item_name']}: "
+                    f"{float(usage['units_used']):g} unit(s)"
+                    for usage in usages
+                ]
+                restoration_text = (
+                    "\n\nRecorded incomplete-treatment usage that "
+                    "will be restored exactly:\n"
+                    + "\n".join(restored_lines)
+                )
+            elif "missed" in treatment_name.lower():
+                restoration_text = (
+                    "\n\nThis missed treatment did not deduct "
+                    "inventory units."
+                )
+            else:
+                restoration_text = (
+                    "\n\nThe inventory deductions associated with "
+                    "this treatment will be undone automatically."
+                )
+
+            message = (
+                "Delete this treatment permanently?\n\n"
+                f"Date: {record['session_date']}\n"
+                f"Type: {treatment_name}"
+                f"{restoration_text}\n\n"
+                "This action cannot be undone."
+            )
+
+            def confirm_delete():
+                try:
+                    self.db.backup_database("change")
+                    self.db.delete_session(session_id)
+                    self.db.backup_database("change")
+                    self.show_treatment_history()
+                    self.themed_dialog(
+                        "Treatment Deleted",
+                        (
+                            "The treatment was deleted. "
+                            "Its inventory usage has been restored."
+                        ),
+                        [("CLOSE", None)],
+                        width=500,
+                        height=230,
+                    )
+                except Exception as ex:
+                    self.themed_dialog(
+                        APP_NAME,
+                        f"Could not delete treatment:\n{ex}",
+                        [("CLOSE", None)],
+                        width=520,
+                        height=240,
+                    )
+
+            selected_action = self.themed_dialog(
+                "Delete Treatment",
+                message,
+                [
+                    ("DELETE TREATMENT", "delete"),
+                    ("CANCEL", None),
+                ],
+                width=610,
+                height=390 if usages else 330,
+            )
+
+            if selected_action == "delete":
+                confirm_delete()
+
+        self.button(
+            toolbar,
+            "Delete Treatment",
+            delete_selected_treatment,
+        ).pack(side="right", padx=(10, 0))
+
         self.button(
             toolbar,
             "Edit Selected Treatment Notes",
             edit_selected_notes,
-        ).pack(side="right")
+        ).pack(side="right", padx=(0, 10))
 
         tree.bind(
             "<Double-1>",
