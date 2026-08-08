@@ -23,10 +23,11 @@ import calendar
 import tkinter.font as tkfont
 from datetime import datetime, date, timedelta
 import tkinter as tk
+import time
 from tkinter import ttk, messagebox, filedialog
 
 APP_NAME = "HHD Inventory Manager"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.5.4"
 DB_NAME = "hhd_inventory.db"
 SETTINGS_FILE = "hhd_inventory_settings.json"
 APP_FOLDER_NAME = "HHD Inventory Manager"
@@ -421,6 +422,10 @@ class InventoryDB:
             full_attempt_usage INTEGER NOT NULL DEFAULT 0,
             allow_half_removal INTEGER NOT NULL DEFAULT 0,
             disallow_half_usage INTEGER NOT NULL DEFAULT 0,
+            baseline_received_cutoff_id INTEGER NOT NULL DEFAULT 0,
+            baseline_correction_cutoff_id INTEGER NOT NULL DEFAULT 0,
+            baseline_session_cutoff_id INTEGER NOT NULL DEFAULT 0,
+            last_inventory_update_date TEXT NOT NULL DEFAULT '',
             active INTEGER NOT NULL DEFAULT 1,
             UNIQUE(group_name, item_name)
         );
@@ -484,6 +489,21 @@ class InventoryDB:
             c.execute(
                 "ALTER TABLE items ADD COLUMN disallow_half_usage INTEGER NOT NULL DEFAULT 0"
             )
+        for column_name in (
+            "baseline_received_cutoff_id",
+            "baseline_correction_cutoff_id",
+            "baseline_session_cutoff_id",
+        ):
+            if column_name not in item_columns:
+                c.execute(
+                    f"ALTER TABLE items ADD COLUMN "
+                    f"{column_name} INTEGER NOT NULL DEFAULT 0"
+                )
+        if "last_inventory_update_date" not in item_columns:
+            c.execute(
+                "ALTER TABLE items ADD COLUMN "
+                "last_inventory_update_date TEXT NOT NULL DEFAULT ''"
+            )
 
         session_columns = {
             row["name"] for row in c.execute(
@@ -516,6 +536,8 @@ class InventoryDB:
             "last_cartridge_lot": "",
             "last_cycler_serial": "",
             "last_pureflow_serial": "",
+            "inventory_reconciliation_v15": "0",
+            "inventory_last_verified_at": "",
         }
         for k, v in defaults.items():
             c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
@@ -571,15 +593,15 @@ class InventoryDB:
                 group_name,item_name,baseline_units,baseline_date,min_threshold,low_threshold,
                 units_per_session,units_per_week,reusable_sessions,lifespan_days,
                 auto_session_usage,full_attempt_usage,allow_half_removal,
-                disallow_half_usage,active
+                disallow_half_usage,last_inventory_update_date,active
             )
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)
         """, (
             group_name, item_name, float(baseline_units), baseline_date,
             float(min_threshold), float(low_threshold), float(units_per_session),
             float(units_per_week), max(float(reusable_sessions), 1.0),
             int(lifespan_days), int(auto_session_usage), int(full_attempt_usage),
-            int(allow_half_removal), int(disallow_half_usage)
+            int(allow_half_removal), int(disallow_half_usage), baseline_date
         ))
         self.conn.commit()
 
@@ -588,7 +610,8 @@ class InventoryDB:
             "group_name", "item_name", "baseline_units", "baseline_date", "min_threshold",
             "low_threshold", "units_per_session", "units_per_week", "reusable_sessions",
             "lifespan_days", "auto_session_usage", "full_attempt_usage",
-            "allow_half_removal", "disallow_half_usage", "active"
+            "allow_half_removal", "disallow_half_usage",
+            "last_inventory_update_date", "active"
         }
         parts, values = [], []
         for k, v in kwargs.items():
@@ -604,29 +627,198 @@ class InventoryDB:
     def deactivate_item(self, item_id):
         self.update_item(item_id, active=0)
 
-    def add_received(self, item_id, received_date, units, notes=""):
+    def snapshot_item_to_current(
+        self,
+        item_id,
+        snapshot_date=None,
+        current_value=None,
+    ):
+        """
+        Synchronize one item's stored baseline with its calculated current
+        inventory quantity.
+
+        Transaction cutoffs make the snapshot mathematically neutral:
+        transactions already represented in baseline_units are excluded from
+        future current-count calculations, while later same-day transactions
+        continue to apply normally.
+        """
+        item = self.item_by_id(item_id)
+        if not item:
+            raise ValueError("Inventory item was not found.")
+
+        snapshot_day = parse_date(snapshot_date or iso_today())
+        snapshot_iso = snapshot_day.isoformat()
+
+        if current_value is None:
+            current_value = self.current_count(item)[0]
+        current_value = round_half_unit(current_value)
+
+        received_cutoff = self.conn.execute(
+            """SELECT COALESCE(MAX(id),0) AS value
+               FROM received_inventory
+               WHERE item_id=? AND received_date<=?""",
+            (item_id, snapshot_iso),
+        ).fetchone()["value"]
+
+        correction_cutoff = self.conn.execute(
+            """SELECT COALESCE(MAX(id),0) AS value
+               FROM corrections
+               WHERE item_id=? AND correction_date<=?""",
+            (item_id, snapshot_iso),
+        ).fetchone()["value"]
+
+        session_cutoff = self.conn.execute(
+            """SELECT COALESCE(MAX(id),0) AS value
+               FROM session_log
+               WHERE session_date<=?""",
+            (snapshot_iso,),
+        ).fetchone()["value"]
+
         self.conn.execute(
-            "INSERT INTO received_inventory(item_id,received_date,units,notes) VALUES(?,?,?,?)",
-            (item_id, received_date, units, notes)
+            """UPDATE items
+               SET baseline_units=?,
+                   baseline_date=?,
+                   baseline_received_cutoff_id=?,
+                   baseline_correction_cutoff_id=?,
+                   baseline_session_cutoff_id=?,
+                   last_inventory_update_date=?
+               WHERE id=?""",
+            (
+                current_value,
+                snapshot_iso,
+                int(received_cutoff or 0),
+                int(correction_cutoff or 0),
+                int(session_cutoff or 0),
+                snapshot_iso,
+                item_id,
+            ),
         )
-        self.conn.commit()
+
+        return current_value
+
+    def add_received(self, item_id, received_date, units, notes=""):
+        """
+        Record received inventory and make the resulting quantity the new
+        current/baseline inventory count for the item.
+
+        Transaction cutoffs prevent the received stock or any earlier activity
+        on the same date from being counted twice. New activity recorded later
+        on the same date is still applied normally.
+        """
+        item = self.item_by_id(item_id)
+        if not item:
+            raise ValueError("Inventory item was not found.")
+
+        received_day = parse_date(received_date)
+        baseline_day = parse_date(
+            item["baseline_date"]
+            or self.get_setting("created_date", iso_today())
+        )
+        if received_day < baseline_day:
+            raise ValueError(
+                "Received inventory date cannot be earlier than the "
+                "item's current inventory count date."
+            )
+
+        current_before = self.historical_count_as_of(item, received_day)
+        if current_before is None:
+            current_before = float(item["baseline_units"])
+
+        units = validate_half_unit(units, "Units received")
+        new_baseline = round_half_unit(float(current_before) + units)
+        received_iso = received_day.isoformat()
+
+        try:
+            self.conn.execute("BEGIN")
+            self.conn.execute(
+                """INSERT INTO received_inventory(
+                       item_id,received_date,units,notes
+                   ) VALUES(?,?,?,?)""",
+                (item_id, received_iso, units, notes),
+            )
+
+            received_cutoff = self.conn.execute(
+                """SELECT COALESCE(MAX(id),0) AS value
+                   FROM received_inventory
+                   WHERE item_id=? AND received_date<=?""",
+                (item_id, received_iso),
+            ).fetchone()["value"]
+
+            correction_cutoff = self.conn.execute(
+                """SELECT COALESCE(MAX(id),0) AS value
+                   FROM corrections
+                   WHERE item_id=? AND correction_date<=?""",
+                (item_id, received_iso),
+            ).fetchone()["value"]
+
+            session_cutoff = self.conn.execute(
+                """SELECT COALESCE(MAX(id),0) AS value
+                   FROM session_log
+                   WHERE session_date<=?""",
+                (received_iso,),
+            ).fetchone()["value"]
+
+            self.conn.execute(
+                """UPDATE items
+                   SET baseline_units=?,
+                       baseline_date=?,
+                       baseline_received_cutoff_id=?,
+                       baseline_correction_cutoff_id=?,
+                       baseline_session_cutoff_id=?,
+                       last_inventory_update_date=?
+                   WHERE id=?""",
+                (
+                    new_baseline,
+                    received_iso,
+                    int(received_cutoff or 0),
+                    int(correction_cutoff or 0),
+                    int(session_cutoff or 0),
+                    received_iso,
+                    item_id,
+                ),
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+        return new_baseline
 
     def add_correction(self, item_id, correction_date, units_delta, notes=""):
         delta = validate_half_unit(units_delta, "Correction")
-        self.conn.execute(
-            """INSERT INTO corrections(item_id,correction_date,units_delta,notes)
-               VALUES(?,?,?,?)""",
-            (item_id, parse_date(correction_date).isoformat(), delta, notes),
-        )
-        self.conn.commit()
+        correction_iso = parse_date(correction_date).isoformat()
+
+        item = self.item_by_id(item_id)
+        if not item:
+            raise ValueError("Inventory item was not found.")
+
+        try:
+            self.conn.execute("BEGIN")
+            self.conn.execute(
+                """INSERT INTO corrections(
+                       item_id,correction_date,units_delta,notes
+                   ) VALUES(?,?,?,?)""",
+                (item_id, correction_iso, delta, notes),
+            )
+
+            refreshed = self.item_by_id(item_id)
+            current_after = self.current_count(refreshed)[0]
+            self.snapshot_item_to_current(
+                item_id,
+                correction_iso,
+                current_after,
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+        return current_after
 
     def remove_existing_half_unit(self, item_id, notes="Half-used item removed"):
         """
-        Remove the existing .5 fraction from an item's calculated total.
-
-        The correction date is never earlier than the item's baseline date, so
-        the correction cannot be excluded from the current-count calculation.
-        The result is verified before returning.
+        Remove the existing .5 fraction and immediately synchronize the
+        item's baseline snapshot to the resulting Dashboard quantity.
         """
         item = self.item_by_id(item_id)
         if not item:
@@ -645,52 +837,36 @@ class InventoryDB:
             or self.get_setting("created_date", iso_today())
         )
         effective_date = max(date.today(), baseline_date)
-
-        cursor = self.conn.execute(
-            """INSERT INTO corrections(item_id,correction_date,units_delta,notes)
-               VALUES(?,?,?,?)""",
-            (item_id, effective_date.isoformat(), -0.5, notes),
-        )
-        correction_id = cursor.lastrowid
-        self.conn.commit()
-
-        refreshed = self.item_by_id(item_id)
-        after, *_ = self.current_count(refreshed)
         target = round_half_unit(before - 0.5)
 
-        if abs(after - target) > 1e-8:
-            # Undo the ineffective correction and adjust the baseline by exactly
-            # the amount needed. This fallback guarantees the visible total.
-            self.conn.execute(
-                "DELETE FROM corrections WHERE id=?",
-                (correction_id,),
-            )
-            baseline_units = float(refreshed["baseline_units"])
-            adjustment = target - before
-            self.conn.execute(
-                "UPDATE items SET baseline_units=? WHERE id=?",
-                (round_half_unit(baseline_units + adjustment), item_id),
-            )
-            self.conn.execute(
-                """INSERT INTO corrections(item_id,correction_date,units_delta,notes)
-                   VALUES(?,?,?,?)""",
-                (
-                    item_id,
-                    effective_date.isoformat(),
-                    0.0,
-                    notes + " (applied through baseline adjustment)",
-                ),
-            )
-            self.conn.commit()
-            after, *_ = self.current_count(self.item_by_id(item_id))
+        after = self.add_correction(
+            item_id,
+            effective_date.isoformat(),
+            -0.5,
+            notes,
+        )
 
-        if abs(after - target) > 1e-8:
+        refreshed = self.item_by_id(item_id)
+        baseline_after = round_half_unit(
+            float(refreshed["baseline_units"])
+        )
+        current_after = round_half_unit(
+            self.current_count(refreshed)[0]
+        )
+
+        if (
+            abs(after - target) > 1e-8
+            or abs(current_after - target) > 1e-8
+            or abs(baseline_after - target) > 1e-8
+        ):
             raise RuntimeError(
-                f"Half-unit removal failed verification: "
-                f"{before:g} remained {after:g}."
+                "Half-unit removal failed baseline/current verification: "
+                f"expected {target:g}, baseline is {baseline_after:g}, "
+                f"current is {current_after:g}."
             )
 
-        return before, after
+        return before, current_after
+
 
     def add_session(
         self,
@@ -774,51 +950,81 @@ class InventoryDB:
             (session_id,),
         ).fetchall()
 
+    def item_usage_for_session(self, item, session):
+        stype = (session["session_type"] or "").lower()
+        if "missed" in stype:
+            return 0.0
+
+        if "incomplete" in stype:
+            row = self.conn.execute(
+                """SELECT COALESCE(SUM(units_used),0) AS total
+                   FROM session_item_usage
+                   WHERE session_id=? AND item_id=?""",
+                (session["id"], item["id"]),
+            ).fetchone()
+            explicit_usage = float(row["total"] or 0)
+            if explicit_usage > 0:
+                return explicit_usage
+
+            # Special lifespan/attempt rule (for example SAK):
+            # an attempted incomplete treatment still consumes the configured
+            # reusable-session slot even when SAK was not manually listed.
+            if (
+                int(item["full_attempt_usage"] or 0) == 1
+                and int(item["auto_session_usage"] or 0) == 1
+            ):
+                reusable = max(
+                    float(item["reusable_sessions"] or 1),
+                    1.0,
+                )
+                amount = float(item["units_per_session"] or 0) / reusable
+                if int(item["disallow_half_usage"] or 0) == 1:
+                    amount = math.ceil(amount - 1e-9)
+                return float(amount)
+
+            return 0.0
+
+        if int(item["auto_session_usage"] or 0) != 1:
+            return 0.0
+
+        reusable = max(float(item["reusable_sessions"] or 1), 1.0)
+        treatment_equivalent = float(session["session_equivalent"] or 1)
+        amount = (
+            float(item["units_per_session"] or 0)
+            / reusable
+            * treatment_equivalent
+        )
+
+        if int(item["disallow_half_usage"] or 0) == 1:
+            amount = math.ceil(amount - 1e-9)
+
+        return float(amount)
+
     def item_session_usage_units(self, item, since_date, through_date=None):
-        """Calculate actual units used, honoring per-item incomplete entries."""
-        params = [since_date]
+        """Calculate actual units used after the item's current baseline."""
+        cutoff_id = int(item["baseline_session_cutoff_id"] or 0)
+        params = [since_date, since_date, cutoff_id]
         end_clause = ""
         if through_date is not None:
             end_clause = " AND s.session_date<=?"
             params.append(through_date)
+
         sessions = self.conn.execute(
             f"""SELECT s.* FROM session_log s
-                WHERE s.session_date>=? {end_clause}
+                WHERE (
+                    s.session_date>?
+                    OR (s.session_date=? AND s.id>?)
+                )
+                {end_clause}
                 ORDER BY s.session_date,s.id""",
             tuple(params),
         ).fetchall()
+
         total = 0.0
         for session in sessions:
-            stype = (session["session_type"] or "").lower()
-            if "missed" in stype:
-                continue
-            if "incomplete" in stype:
-                row = self.conn.execute(
-                    "SELECT COALESCE(SUM(units_used),0) AS total FROM session_item_usage WHERE session_id=? AND item_id=?",
-                    (session["id"], item["id"]),
-                ).fetchone()
-                total += float(row["total"] or 0)
-                continue
-            if int(item["auto_session_usage"] or 0) != 1:
-                continue
-            reusable = max(float(item["reusable_sessions"] or 1), 1.0)
-            treatment_equivalent = float(session["session_equivalent"] or 1)
-            amount = (
-                float(item["units_per_session"] or 0)
-                / reusable
-                * treatment_equivalent
-            )
-
-            # This option applies to each complete treatment after all usage
-            # multipliers have been applied.  A calculated half-unit deduction
-            # must therefore become the next whole unit (0.5 -> 1, 1.5 -> 2).
-            # Rounding before treatment_equivalent was applied allowed some
-            # complete-treatment entries to still deduct only 0.5.
-            if int(item["disallow_half_usage"] or 0) == 1:
-                amount = math.ceil(amount - 1e-9)
-
-            total += amount
+            total += self.item_usage_for_session(item, session)
         return total
+
 
     def session_by_id(self, session_id):
         return self.conn.execute(
@@ -835,21 +1041,55 @@ class InventoryDB:
 
     def delete_session(self, session_id):
         """
-        Delete one treatment and its saved item-usage rows atomically.
+        Delete a treatment and restore its inventory usage exactly.
 
-        Inventory is calculated from session_log and session_item_usage.
-        Removing these records restores the units deducted by the selected
-        treatment. For incomplete treatments, each exact units_used value
-        recorded for that treatment is removed.
+        If a treatment has already been incorporated into an item's later
+        baseline snapshot, the baseline is increased by that treatment's exact
+        usage before the treatment record is removed.
         """
         record = self.session_by_id(session_id)
         if not record:
             raise ValueError("The selected treatment no longer exists.")
 
         usages = self.session_item_usages(session_id)
+        treatment_day = parse_date(record["session_date"])
+
+        baseline_adjustments = []
+        for item in self.items(include_inactive=True):
+            baseline_day = parse_date(
+                item["baseline_date"]
+                or self.get_setting("created_date", iso_today())
+            )
+            session_cutoff = int(
+                item["baseline_session_cutoff_id"] or 0
+            )
+            baked_into_baseline = (
+                treatment_day < baseline_day
+                or (
+                    treatment_day == baseline_day
+                    and int(record["id"]) <= session_cutoff
+                )
+            )
+            if not baked_into_baseline:
+                continue
+
+            amount = self.item_usage_for_session(item, record)
+            if amount > 0:
+                baseline_adjustments.append(
+                    (float(amount), int(item["id"]))
+                )
 
         try:
             self.conn.execute("BEGIN")
+
+            for amount, item_id in baseline_adjustments:
+                self.conn.execute(
+                    """UPDATE items
+                       SET baseline_units=baseline_units+?
+                       WHERE id=?""",
+                    (amount, item_id),
+                )
+
             self.conn.execute(
                 "DELETE FROM session_item_usage WHERE session_id=?",
                 (session_id,),
@@ -860,41 +1100,54 @@ class InventoryDB:
             )
             if cursor.rowcount != 1:
                 raise RuntimeError("The treatment could not be deleted.")
+
             self.conn.commit()
         except Exception:
             self.conn.rollback()
             raise
 
+        self.refresh_last_inventory_update_dates()
         return record, usages
 
-    def received_sum(self, item_id, since_date):
+
+    def received_sum(self, item, since_date):
+        cutoff_id = int(item["baseline_received_cutoff_id"] or 0)
         row = self.conn.execute(
-            "SELECT COALESCE(SUM(units),0) AS total FROM received_inventory WHERE item_id=? AND received_date>=?",
-            (item_id, since_date)
+            """SELECT COALESCE(SUM(units),0) AS total
+               FROM received_inventory
+               WHERE item_id=?
+                 AND (
+                     received_date>?
+                     OR (received_date=? AND id>?)
+                 )""",
+            (item["id"], since_date, since_date, cutoff_id),
         ).fetchone()
         return float(row["total"])
 
-    def corrections_sum(self, item_id, since_date):
+    def corrections_sum(self, item, since_date):
+        cutoff_id = int(item["baseline_correction_cutoff_id"] or 0)
         row = self.conn.execute(
-            "SELECT COALESCE(SUM(units_delta),0) AS total FROM corrections WHERE item_id=? AND correction_date>=?",
-            (item_id, since_date)
+            """SELECT COALESCE(SUM(units_delta),0) AS total
+               FROM corrections
+               WHERE item_id=?
+                 AND (
+                     correction_date>?
+                     OR (correction_date=? AND id>?)
+                 )""",
+            (item["id"], since_date, since_date, cutoff_id),
         ).fetchone()
         return float(row["total"])
 
     def session_usage_sum(self, item, since_date, through_date=None):
         """
-        Return the number of treatment-use slots applicable to an item.
-
-        Normal items use the treatment equivalent. Items configured to count
-        every attempted treatment as a full use count Regular, Extra, and
-        Incomplete treatments as 1 each. Missed treatments count as 0.
+        Return treatment-equivalent slots after the item's current baseline.
         """
-        clauses = ["session_date>=?"]
-        params = [since_date]
+        cutoff_id = int(item["baseline_session_cutoff_id"] or 0)
+        params = [since_date, since_date, cutoff_id]
+        end_clause = ""
         if through_date is not None:
-            clauses.append("session_date<=?")
+            end_clause = " AND session_date<=?"
             params.append(through_date)
-        where_sql = " AND ".join(clauses)
 
         if int(item["full_attempt_usage"] or 0) == 1:
             expression = """
@@ -909,10 +1162,15 @@ class InventoryDB:
         row = self.conn.execute(
             f"""SELECT COALESCE(SUM({expression}),0) AS total
                 FROM session_log
-                WHERE {where_sql}""",
+                WHERE (
+                    session_date>?
+                    OR (session_date=? AND id>?)
+                )
+                {end_clause}""",
             tuple(params),
         ).fetchone()
         return float(row["total"])
+
 
     def weeks_since(self, since_date):
         d = parse_date(since_date)
@@ -930,17 +1188,46 @@ class InventoryDB:
         as_of_iso = as_of.isoformat()
         baseline_iso = baseline_date.isoformat()
 
+        received_cutoff = int(
+            item["baseline_received_cutoff_id"] or 0
+        )
+        correction_cutoff = int(
+            item["baseline_correction_cutoff_id"] or 0
+        )
+
         received_row = self.conn.execute(
             """SELECT COALESCE(SUM(units),0) AS total
                FROM received_inventory
-               WHERE item_id=? AND received_date>=? AND received_date<=?""",
-            (item["id"], baseline_iso, as_of_iso),
+               WHERE item_id=?
+                 AND (
+                     received_date>?
+                     OR (received_date=? AND id>?)
+                 )
+                 AND received_date<=?""",
+            (
+                item["id"],
+                baseline_iso,
+                baseline_iso,
+                received_cutoff,
+                as_of_iso,
+            ),
         ).fetchone()
         correction_row = self.conn.execute(
             """SELECT COALESCE(SUM(units_delta),0) AS total
                FROM corrections
-               WHERE item_id=? AND correction_date>=? AND correction_date<=?""",
-            (item["id"], baseline_iso, as_of_iso),
+               WHERE item_id=?
+                 AND (
+                     correction_date>?
+                     OR (correction_date=? AND id>?)
+                 )
+                 AND correction_date<=?""",
+            (
+                item["id"],
+                baseline_iso,
+                baseline_iso,
+                correction_cutoff,
+                as_of_iso,
+            ),
         ).fetchone()
         received = float(received_row["total"])
         corrections = float(correction_row["total"])
@@ -988,11 +1275,207 @@ class InventoryDB:
                 points.append((end, value))
         return points
 
+    def latest_item_activity_date(self, item):
+        dates = []
+
+        baseline_date = item["baseline_date"] or ""
+        if baseline_date:
+            dates.append(parse_date(baseline_date))
+
+        row = self.conn.execute(
+            """SELECT MAX(received_date) AS value
+               FROM received_inventory
+               WHERE item_id=?""",
+            (item["id"],),
+        ).fetchone()
+        if row and row["value"]:
+            dates.append(parse_date(row["value"]))
+
+        row = self.conn.execute(
+            """SELECT MAX(correction_date) AS value
+               FROM corrections
+               WHERE item_id=?""",
+            (item["id"],),
+        ).fetchone()
+        if row and row["value"]:
+            dates.append(parse_date(row["value"]))
+
+        sessions = self.conn.execute(
+            """SELECT * FROM session_log
+               ORDER BY session_date,id"""
+        ).fetchall()
+        for session in sessions:
+            if self.item_usage_for_session(item, session) > 0:
+                dates.append(parse_date(session["session_date"]))
+
+        # Time-based weekly deductions change the current quantity as time
+        # advances, so today's date is the latest effective update date.
+        if float(item["units_per_week"] or 0) > 0:
+            dates.append(date.today())
+
+        return max(dates) if dates else date.today()
+
+    def touch_item_update_date(self, item_id, update_date):
+        update_iso = parse_date(update_date).isoformat()
+        self.conn.execute(
+            """UPDATE items
+               SET last_inventory_update_date=?
+               WHERE id=?""",
+            (update_iso, item_id),
+        )
+
+    def refresh_last_inventory_update_dates(self):
+        for item in self.items(include_inactive=True):
+            latest = self.latest_item_activity_date(item).isoformat()
+            self.conn.execute(
+                """UPDATE items
+                   SET last_inventory_update_date=?
+                   WHERE id=?""",
+                (latest, item["id"]),
+            )
+        self.conn.commit()
+
+    def mark_treatment_inventory_update(self, session_id):
+        session = self.session_by_id(session_id)
+        if not session:
+            return
+
+        session_date = session["session_date"]
+        for item in self.items(include_inactive=True):
+            if self.item_usage_for_session(item, session) > 0:
+                self.touch_item_update_date(item["id"], session_date)
+        self.conn.commit()
+
+    def verify_and_reconcile_inventory(self, progress_callback=None):
+        """
+        Verify inventory math on every startup.
+
+        On the first v1.5+ startup, create a synchronized inventory snapshot:
+        each item's baseline becomes its currently calculated Dashboard total.
+        The snapshot date is today, while last_inventory_update_date preserves
+        the actual last inventory activity date. Transaction cutoffs prevent
+        historical activity from being counted again after the snapshot.
+        """
+        items = self.items(include_inactive=True)
+        total = max(1, len(items))
+        first_reconciliation = (
+            self.get_setting("inventory_reconciliation_v15", "0") != "1"
+        )
+
+        if first_reconciliation:
+            # One rolling safety backup before rewriting baseline snapshots.
+            self.backup_database("change")
+
+        snapshot_date = iso_today()
+        results = []
+
+        for index, item in enumerate(items, start=1):
+            if progress_callback:
+                progress_callback(
+                    index - 1,
+                    total,
+                    f"Verifying {item['item_name']}..."
+                )
+
+            current, *_ = self.current_count(item)
+            current = round_half_unit(current)
+            last_update = self.latest_item_activity_date(item).isoformat()
+
+            if first_reconciliation:
+                received_cutoff = self.conn.execute(
+                    """SELECT COALESCE(MAX(id),0) AS value
+                       FROM received_inventory
+                       WHERE item_id=? AND received_date<=?""",
+                    (item["id"], snapshot_date),
+                ).fetchone()["value"]
+
+                correction_cutoff = self.conn.execute(
+                    """SELECT COALESCE(MAX(id),0) AS value
+                       FROM corrections
+                       WHERE item_id=? AND correction_date<=?""",
+                    (item["id"], snapshot_date),
+                ).fetchone()["value"]
+
+                session_cutoff = self.conn.execute(
+                    """SELECT COALESCE(MAX(id),0) AS value
+                       FROM session_log
+                       WHERE session_date<=?""",
+                    (snapshot_date,),
+                ).fetchone()["value"]
+
+                self.conn.execute(
+                    """UPDATE items
+                       SET baseline_units=?,
+                           baseline_date=?,
+                           baseline_received_cutoff_id=?,
+                           baseline_correction_cutoff_id=?,
+                           baseline_session_cutoff_id=?,
+                           last_inventory_update_date=?
+                       WHERE id=?""",
+                    (
+                        current,
+                        snapshot_date,
+                        int(received_cutoff or 0),
+                        int(correction_cutoff or 0),
+                        int(session_cutoff or 0),
+                        last_update,
+                        item["id"],
+                    ),
+                )
+            else:
+                baseline_value = round_half_unit(
+                    float(item["baseline_units"])
+                )
+                if abs(current - baseline_value) > 1e-8:
+                    # Repair drift left by older builds/manual corrections.
+                    # This creates a neutral snapshot and prevents the same
+                    # transactions from being counted twice afterwards.
+                    self.snapshot_item_to_current(
+                        item["id"],
+                        snapshot_date,
+                        current,
+                    )
+                else:
+                    self.conn.execute(
+                        """UPDATE items
+                           SET last_inventory_update_date=?
+                           WHERE id=?""",
+                        (last_update, item["id"]),
+                    )
+
+            results.append((item["id"], current, last_update))
+
+            if progress_callback:
+                progress_callback(
+                    index,
+                    total,
+                    f"Verified {item['item_name']}"
+                )
+
+        self.conn.execute(
+            """INSERT OR REPLACE INTO settings(key,value)
+               VALUES('inventory_reconciliation_v15','1')"""
+        )
+        verified_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        self.conn.execute(
+            """INSERT OR REPLACE INTO settings(key,value)
+               VALUES('inventory_last_verified_at',?)""",
+            (verified_at,),
+        )
+        self.conn.commit()
+
+        return {
+            "items_verified": len(items),
+            "reconciled": first_reconciliation,
+            "verified_at": verified_at,
+            "results": results,
+        }
+
     def current_count(self, item):
         baseline = float(item["baseline_units"])
         since = item["baseline_date"] or self.get_setting("created_date", iso_today())
-        received = self.received_sum(item["id"], since)
-        corrections = self.corrections_sum(item["id"], since)
+        received = self.received_sum(item, since)
+        corrections = self.corrections_sum(item, since)
         sessions = self.session_usage_sum(item, since)
         session_usage = self.item_session_usage_units(item, since)
 
@@ -1207,6 +1690,8 @@ class HHDApp(tk.Tk):
         self.style.theme_use("clam")
         self.configure_styles()
 
+        self.run_startup_database_verification()
+
         self.container = tk.Frame(self, bg=BLUE_BG)
         self.container.pack(fill="both", expand=True)
 
@@ -1244,6 +1729,157 @@ class HHDApp(tk.Tk):
             150,
             lambda: request_windows_titlebar(self.winfo_id()),
         )
+
+    def run_startup_database_verification(self):
+        # The main window must be realized before positioning a transient
+        # frameless popup. Otherwise Windows may briefly place it at 0,0.
+        self.update_idletasks()
+        try:
+            self.state("normal")
+        except tk.TclError:
+            pass
+        self.update_idletasks()
+
+        win = tk.Toplevel(self)
+        win.withdraw()
+        win.overrideredirect(True)
+        win.configure(bg=BORDER)
+        win.transient(self)
+
+        outer = tk.Frame(
+            win,
+            bg=BLUE_PANEL,
+            highlightbackground=BORDER,
+            highlightthickness=2,
+        )
+        outer.pack(fill="both", expand=True, padx=2, pady=2)
+
+        tk.Label(
+            outer,
+            text="DB verification and update in progress",
+            bg=BLUE_HEADER,
+            fg=HEADER_TEXT,
+            font=("Segoe UI", 13, "bold"),
+            padx=18,
+            pady=12,
+        ).pack(fill="x")
+
+        status_var = tk.StringVar(
+            value="Preparing database verification..."
+        )
+        tk.Label(
+            outer,
+            textvariable=status_var,
+            bg=BLUE_PANEL,
+            fg=TEXT,
+            font=("Segoe UI", 10),
+            anchor="w",
+            padx=18,
+            pady=14,
+        ).pack(fill="x")
+
+        progress = ttk.Progressbar(
+            outer,
+            orient="horizontal",
+            mode="determinate",
+            maximum=100,
+            length=420,
+        )
+        progress.pack(fill="x", padx=18, pady=(0, 8))
+
+        percent_var = tk.StringVar(value="0%")
+        tk.Label(
+            outer,
+            textvariable=percent_var,
+            bg=BLUE_PANEL,
+            fg=MUTED,
+            font=("Segoe UI", 9),
+            anchor="e",
+            padx=18,
+            pady=0,
+        ).pack(fill="x", pady=(0, 12))
+
+        width = 520
+        height = 190
+
+        # Center relative to the actual application window, not the screen.
+        self.update_idletasks()
+        root_x = self.winfo_rootx()
+        root_y = self.winfo_rooty()
+        root_w = max(1, self.winfo_width())
+        root_h = max(1, self.winfo_height())
+
+        # During the first geometry pass Tk can still report 1x1. Use the
+        # application's requested geometry as a safe fallback.
+        if root_w <= 10:
+            root_w = max(1080, self.winfo_reqwidth())
+        if root_h <= 10:
+            root_h = max(680, self.winfo_reqheight())
+
+        x = root_x + max(0, (root_w - width) // 2)
+        y = root_y + max(0, (root_h - height) // 2)
+        win.geometry(f"{width}x{height}+{x}+{y}")
+
+        win.deiconify()
+        win.lift()
+        try:
+            win.attributes("-topmost", True)
+            win.after(150, lambda: win.attributes("-topmost", False))
+        except tk.TclError:
+            pass
+        win.update_idletasks()
+        win.update()
+
+        # Keep the popup visible long enough to be readable even when the
+        # database is small and verification itself completes almost instantly.
+        shown_at = time.monotonic()
+        minimum_visible_seconds = 1.8
+        last_visual_update = [shown_at]
+
+        def update_progress(done, total, message):
+            percent = 100 if total <= 0 else int((done / total) * 100)
+            percent = max(0, min(100, percent))
+            progress["value"] = percent
+            percent_var.set(f"{percent}%")
+            status_var.set(message)
+            win.update_idletasks()
+            win.update()
+
+            # Small pacing interval lets the user actually see progress on
+            # fast databases without making startup unnecessarily slow.
+            elapsed = time.monotonic() - last_visual_update[0]
+            if elapsed < 0.035:
+                time.sleep(0.035 - elapsed)
+            last_visual_update[0] = time.monotonic()
+
+        try:
+            result = self.db.verify_and_reconcile_inventory(
+                progress_callback=update_progress
+            )
+            update_progress(
+                max(1, result["items_verified"]),
+                max(1, result["items_verified"]),
+                "Database verification complete."
+            )
+
+            remaining = (
+                minimum_visible_seconds
+                - (time.monotonic() - shown_at)
+            )
+            if remaining > 0:
+                # Keep processing UI messages while holding the completed
+                # verification display on screen.
+                finish_at = time.monotonic() + remaining
+                while time.monotonic() < finish_at:
+                    win.update_idletasks()
+                    win.update()
+                    time.sleep(0.02)
+        finally:
+            try:
+                win.destroy()
+            except tk.TclError:
+                pass
+
 
     def set_app_icon(self):
         """Set the Windows taskbar/Alt-Tab/window icon as reliably as Tk allows."""
@@ -2032,16 +2668,28 @@ class HHDApp(tk.Tk):
             ("⌂  Dashboard", self.show_dashboard),
             (f"▣  {self.group_display_name(GROUP_NX)}", lambda: self.show_inventory(GROUP_NX)),
             (f"▣  {self.group_display_name(GROUP_DV)}", lambda: self.show_inventory(GROUP_DV)),
-            ("▦  Treatment Calendar", self.show_treatment_calendar),
+            None,
+            ("▦  Calendar", self.show_treatment_calendar),
             ("▤  Treatment History", self.show_treatment_history),
             ("⌁  Inventory History", self.show_inventory_history),
+            None,
             ("＋  Received Inventory", self.show_received),
             ("⌕  Lot Number Search", self.show_lot_number_search),
+            None,
             ("⇧  Import DB", self.import_database_action),
             ("⇩  Export DB", self.export_database_action),
             ("⇩  Export Inventory CSV", self.export_csv),
         ]
-        for text, cmd in buttons:
+        for entry in buttons:
+            if entry is None:
+                tk.Frame(
+                    menu,
+                    bg=BORDER,
+                    height=1,
+                ).pack(fill="x", padx=14, pady=6)
+                continue
+
+            text, cmd = entry
             tk.Button(
                 menu,
                 text=text,
@@ -2282,7 +2930,8 @@ class HHDApp(tk.Tk):
             ("group_name", "Inventory Group", group_var, "combo"),
             ("item_name", "Item Name", name_var, "entry"),
             ("baseline_units", "Current/Baseline Units", tk.StringVar(value=val("baseline_units", 0)), "entry"),
-            ("baseline_date", "Inventory Count Date YYYY-MM-DD", tk.StringVar(value=val("baseline_date", iso_today())), "entry"),
+            ("baseline_date", "Baseline Snapshot Date YYYY-MM-DD", tk.StringVar(value=val("baseline_date", iso_today())), "entry"),
+            ("last_inventory_update_date", "Last Inventory Update", tk.StringVar(value=val("last_inventory_update_date", iso_today())), "readonly"),
             ("units_per_session", "Units Used Per Session", tk.StringVar(value=val("units_per_session", 0)), "entry"),
             ("units_per_week", "Additional Units Used Per Week", tk.StringVar(value=val("units_per_week", 0)), "entry"),
             ("reusable_sessions", "Reusable For # Sessions", tk.StringVar(value=val("reusable_sessions", 1)), "entry"),
@@ -2298,6 +2947,8 @@ class HHDApp(tk.Tk):
                 e = ttk.Combobox(form, textvariable=var, values=[self.group_display_name(GROUP_NX), self.group_display_name(GROUP_DV)], width=34, state="readonly")
             else:
                 e = tk.Entry(form, textvariable=var, bg=INPUT_BG, fg=TEXT, insertbackground=TEXT, relief="solid", bd=1, font=("Segoe UI", 10), width=38)
+                if typ == "readonly":
+                    e.configure(state="readonly", readonlybackground=INPUT_BG)
             e.grid(row=idx, column=1, sticky="ew", padx=14, pady=7)
 
         auto_var = tk.IntVar(value=1 if is_new else int(item["auto_session_usage"]))
@@ -2693,15 +3344,33 @@ class HHDApp(tk.Tk):
 
         def scroll_dialog(event):
             if not scrolling_enabled["value"]:
-                return
-            if event.delta:
-                canvas.yview_scroll(
-                    -1 * int(event.delta / 120),
-                    "units",
-                )
+                return "break"
 
-        canvas.bind("<MouseWheel>", scroll_dialog)
-        body.bind("<MouseWheel>", scroll_dialog)
+            delta = getattr(event, "delta", 0)
+            if delta:
+                steps = -1 if delta > 0 else 1
+                canvas.yview_scroll(steps * 3, "units")
+            return "break"
+
+        def scroll_dialog_linux(event):
+            if not scrolling_enabled["value"]:
+                return "break"
+            if getattr(event, "num", None) == 4:
+                canvas.yview_scroll(-3, "units")
+            elif getattr(event, "num", None) == 5:
+                canvas.yview_scroll(3, "units")
+            return "break"
+
+        def bind_mousewheel_recursive(widget):
+            widget.bind("<MouseWheel>", scroll_dialog, add="+")
+            widget.bind("<Button-4>", scroll_dialog_linux, add="+")
+            widget.bind("<Button-5>", scroll_dialog_linux, add="+")
+            for child in widget.winfo_children():
+                bind_mousewheel_recursive(child)
+
+        # Bind every widget inside this floating dialog. Wheel events over
+        # note labels, cards, or blank canvas space all scroll the details.
+        bind_mousewheel_recursive(win)
 
         # Build the window fully before applying geometry or acquiring
         # the modal grab. This avoids the previous UI freeze.
@@ -2715,25 +3384,59 @@ class HHDApp(tk.Tk):
         main_width = max(620, self.winfo_width())
         main_height = max(420, self.winfo_height())
 
-        # Keep the dialog comfortably inside the main application window.
-        # Width remains stable, while height follows the actual content.
+        # Width stays stable; height follows content but never exceeds
+        # the main application window.
         width = min(740, max(620, main_width - 80))
         max_height = max(360, main_height - 80)
 
-        header_height = outer.winfo_reqheight() - body.winfo_reqheight()
-        natural_height = max(
-            300,
-            header_height + body.winfo_reqheight() + 20,
+        # Reserve the non-scrollable portions first. This guarantees that
+        # the title/header and OK footer remain visible at all times.
+        title_widgets = [
+            child
+            for child in outer.winfo_children()
+            if child is not content_shell and child is not footer
+        ]
+        header_height = sum(
+            max(0, child.winfo_reqheight())
+            for child in title_widgets
+        )
+        footer_height = max(52, footer.winfo_reqheight())
+        outer_padding = 46
+
+        content_needed = max(1, body.winfo_reqheight())
+        content_available = max(
+            160,
+            max_height
+            - header_height
+            - footer_height
+            - outer_padding,
         )
 
-        scrolling_enabled["value"] = natural_height > max_height
+        scrolling_enabled["value"] = content_needed > content_available
 
         if scrolling_enabled["value"]:
             scrollbar.pack(side="right", fill="y")
+            content_height = content_available
             height = max_height
         else:
-            # No unnecessary empty vertical space for short content.
-            height = natural_height
+            # Content fits: no scrollbar and no large empty area.
+            content_height = content_needed
+            height = min(
+                max_height,
+                header_height
+                + footer_height
+                + content_height
+                + outer_padding,
+            )
+
+        # Force the canvas viewport to the calculated visible content height.
+        canvas.configure(height=content_height)
+
+        # Ensure the canvas knows the full scrollable extent after sizing.
+        win.update_idletasks()
+        bbox = canvas.bbox("all")
+        if bbox:
+            canvas.configure(scrollregion=bbox)
 
         x = self.winfo_rootx() + max(
             0,
@@ -2744,18 +3447,22 @@ class HHDApp(tk.Tk):
             (self.winfo_height() - height) // 2,
         )
 
-        # Keep the dialog within both the main window and the visible screen.
+        main_left = self.winfo_rootx() + 20
+        main_top = self.winfo_rooty() + 20
+        main_right = self.winfo_rootx() + self.winfo_width() - 20
+        main_bottom = self.winfo_rooty() + self.winfo_height() - 20
+
         max_x = min(
-            self.winfo_rootx() + self.winfo_width() - width - 20,
+            main_right - width,
             screen_width - width - 20,
         )
         max_y = min(
-            self.winfo_rooty() + self.winfo_height() - height - 20,
+            main_bottom - height,
             screen_height - height - 40,
         )
 
-        x = min(max(self.winfo_rootx() + 20, x), max_x)
-        y = min(max(self.winfo_rooty() + 20, y), max_y)
+        x = min(max(main_left, x), max(main_left, max_x))
+        y = min(max(main_top, y), max(main_top, max_y))
 
         win.geometry(f"{width}x{height}+{x}+{y}")
         win.deiconify()
@@ -3052,7 +3759,7 @@ class HHDApp(tk.Tk):
 
     def show_treatment_calendar(self):
         self.clear_content()
-        tk.Label(self.content, text="Treatment Calendar", bg=BLUE_BG, fg=CYAN,
+        tk.Label(self.content, text="Calendar", bg=BLUE_BG, fg=CYAN,
                  font=("Segoe UI", 17, "bold")).pack(anchor="w", padx=16, pady=12)
         state={"mode":"Month","last_mode":"Month","anchor":date.today().replace(day=1),"fade_step":0,"fade_direction":1,"today_cells":[],"fade_job":None}
         controls_panel, controls=self.make_panel(self.content,"Calendar Controls")
@@ -3145,7 +3852,7 @@ class HHDApp(tk.Tk):
 
         def export_calendar_csv():
             filename = filedialog.asksaveasfilename(
-                title="Export Treatment Calendar CSV",
+                title="Export Calendar CSV",
                 defaultextension=".csv",
                 initialfile=f"HHD_Treatment_Calendar_{date.today().isoformat()}.csv",
                 filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")],
@@ -3172,7 +3879,7 @@ class HHDApp(tk.Tk):
                             record["pak_lot"], record["sak_lot"],
                             record["cartridge_lot"], record["notes"] or "",
                         ])
-                self.themed_export_complete(filename, "Treatment Calendar Export")
+                self.themed_export_complete(filename, "Calendar Export")
             except Exception as ex:
                 self.themed_dialog(
                     APP_NAME,
@@ -4012,7 +4719,7 @@ class HHDApp(tk.Tk):
             missed = treatment_type == "Missed Treatment"
 
             equiv_var.set(
-                "0.5" if incomplete else ("0" if missed else "1")
+                "0" if incomplete or missed else "1"
             )
 
             item_combo.configure(
@@ -4048,8 +4755,9 @@ class HHDApp(tk.Tk):
 
                 if "Incomplete" in session_type and not pending:
                     raise ValueError(
-                        "Add at least one item used during the "
-                        "incomplete treatment."
+                        "Incomplete treatment cannot be saved until "
+                        "at least one used item and its actual units "
+                        "(0.5 to 10) have been entered."
                     )
 
                 session_id = self.db.add_session(
@@ -4074,6 +4782,7 @@ class HHDApp(tk.Tk):
                             units,
                         )
 
+                self.db.mark_treatment_inventory_update(session_id)
                 self.db.backup_database("change")
                 self.show_log_session()
                 self.after(50, self.show_treatment_saved_dialog)
