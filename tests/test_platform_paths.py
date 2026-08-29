@@ -7,6 +7,18 @@ import hhd_inventory_manager as app
 
 class PlatformPathTests(unittest.TestCase):
     @mock.patch("hhd_inventory_manager.os.makedirs")
+    @mock.patch("hhd_inventory_manager.os.path.expanduser", return_value="C:\\Users\\test")
+    def test_windows_uses_local_app_data(self, _expanduser, _makedirs):
+        with mock.patch.object(app.os, "name", "nt"), mock.patch.dict(
+            os.environ,
+            {"LOCALAPPDATA": "C:\\Users\\test\\AppData\\Local"},
+        ):
+            self.assertEqual(
+                "C:\\Users\\test\\AppData\\Local\\HHD Inventory Manager",
+                app.user_data_dir(),
+            )
+
+    @mock.patch("hhd_inventory_manager.os.makedirs")
     @mock.patch("hhd_inventory_manager.os.path.expanduser", return_value="/Users/test")
     def test_macos_uses_application_support(self, _expanduser, _makedirs):
         with mock.patch.object(app.os, "name", "posix"), mock.patch.object(

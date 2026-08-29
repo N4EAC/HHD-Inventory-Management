@@ -11,6 +11,8 @@ Changes in v0.1.1:
 """
 
 import os
+import ntpath
+import posixpath
 import sys
 import sqlite3
 import csv
@@ -258,20 +260,23 @@ def user_data_dir():
 
     home = os.path.expanduser("~")
     if os.name == "nt":
-        base = os.environ.get("LOCALAPPDATA") or os.path.join(
+        path_module = ntpath
+        base = os.environ.get("LOCALAPPDATA") or path_module.join(
             home,
             "AppData",
             "Local",
         )
     elif sys.platform == "darwin":
-        base = os.path.join(home, "Library", "Application Support")
+        path_module = posixpath
+        base = path_module.join(home, "Library", "Application Support")
     else:
-        base = os.environ.get("XDG_DATA_HOME") or os.path.join(
+        path_module = posixpath
+        base = os.environ.get("XDG_DATA_HOME") or path_module.join(
             home,
             ".local",
             "share",
         )
-    path = os.path.join(base, APP_FOLDER_NAME)
+    path = path_module.join(base, APP_FOLDER_NAME)
     os.makedirs(path, exist_ok=True)
     return path
 
