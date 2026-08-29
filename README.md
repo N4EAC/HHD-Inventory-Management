@@ -1,6 +1,10 @@
 # HHD Inventory Manager
 
 HHD Inventory Manager was created to help home hemodialysis patients and caregivers organize treatment supplies, record treatment activity, and maintain a clear history of inventory and treatment information.
+
+The current production package targets Windows. macOS packaging is in
+development, with Ubuntu 24.04 planned next. All platforms use the same SQLite
+database format so databases can be exported and imported between systems.
 <img width="1584" height="988" alt="image" src="https://github.com/user-attachments/assets/3e618332-5457-4214-80de-8d2de28d12d1" />
 
 ## Functions

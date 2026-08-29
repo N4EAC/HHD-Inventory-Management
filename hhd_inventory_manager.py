@@ -11,6 +11,7 @@ Changes in v0.1.1:
 """
 
 import os
+import sys
 import sqlite3
 import csv
 import ctypes
@@ -261,15 +262,33 @@ DEFAULT_ITEMS = [
 ]
 
 def app_dir():
-    return os.path.dirname(os.path.abspath(__file__))
+    return getattr(
+        sys,
+        "_MEIPASS",
+        os.path.dirname(os.path.abspath(__file__)),
+    )
 
 def user_data_dir():
     """Writable per-user application data folder.
 
-    Program Files is not writable by normal users, so the live database and
-    settings must live in AppData, not beside the installed EXE.
+    Keep one database format across platforms while using each operating
+    system's normal writable application-data location.
     """
-    base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Local")
+    home = os.path.expanduser("~")
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or os.path.join(
+            home,
+            "AppData",
+            "Local",
+        )
+    elif sys.platform == "darwin":
+        base = os.path.join(home, "Library", "Application Support")
+    else:
+        base = os.environ.get("XDG_DATA_HOME") or os.path.join(
+            home,
+            ".local",
+            "share",
+        )
     path = os.path.join(base, APP_FOLDER_NAME)
     os.makedirs(path, exist_ok=True)
     return path
@@ -1680,6 +1699,49 @@ class X11TitleBar(tk.Frame):
     def do_move(self, event):
         self.master.geometry(f"+{event.x_root - self._drag_x}+{event.y_root - self._drag_y}")
 
+
+class ColorButton(tk.Label):
+    """Flat button whose colors are honored by Windows, macOS, and Linux."""
+
+    def __init__(
+        self,
+        master,
+        text,
+        command,
+        bg,
+        fg,
+        activebackground,
+        activeforeground,
+        **kwargs,
+    ):
+        self.command = command
+        self.normal_bg = bg
+        self.normal_fg = fg
+        self.active_bg = activebackground
+        self.active_fg = activeforeground
+        kwargs.setdefault("disabledforeground", MUTED)
+        kwargs.setdefault("takefocus", True)
+        super().__init__(master, text=text, bg=bg, fg=fg, **kwargs)
+        self.bind("<Enter>", self._enter)
+        self.bind("<Leave>", self._leave)
+        self.bind("<ButtonRelease-1>", self._activate)
+        self.bind("<Return>", self._activate)
+        self.bind("<space>", self._activate)
+
+    def _enabled(self):
+        return str(self.cget("state")) != "disabled"
+
+    def _enter(self, _event=None):
+        if self._enabled():
+            super().configure(bg=self.active_bg, fg=self.active_fg)
+
+    def _leave(self, _event=None):
+        super().configure(bg=self.normal_bg, fg=self.normal_fg)
+
+    def _activate(self, _event=None):
+        if self._enabled() and self.command:
+            self.command()
+
 class HHDApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -2639,8 +2701,20 @@ class HHDApp(tk.Tk):
             ).pack(side="left", padx=4)
 
     def button(self, parent, text, command):
-        return tk.Button(parent, text=text, command=command, bg=BUTTON_BG, fg=TEXT, activebackground=BUTTON_HOVER,
-                         activeforeground=TEXT, relief="flat", padx=14, pady=7, font=("Segoe UI", 10), cursor="hand2")
+        return ColorButton(
+            parent,
+            text=text,
+            command=command,
+            bg=BUTTON_BG,
+            fg=TEXT,
+            activebackground=BUTTON_HOVER,
+            activeforeground=TEXT,
+            relief="flat",
+            padx=14,
+            pady=7,
+            font=("Segoe UI", 10),
+            cursor="hand2",
+        )
 
     def build_windows_menu(self):
         menubar = tk.Menu(self)
@@ -2660,7 +2734,7 @@ class HHDApp(tk.Tk):
         bottom = tk.Frame(self.sidebar, bg=BLUE_PANEL)
         bottom.pack(side="bottom", fill="x", padx=8, pady=(8, 14))
 
-        tk.Button(
+        ColorButton(
             bottom,
             text="✓  Record Treatment",
             command=self.show_log_session,
@@ -2720,7 +2794,7 @@ class HHDApp(tk.Tk):
                 continue
 
             text, cmd = entry
-            tk.Button(
+            ColorButton(
                 menu,
                 text=text,
                 command=cmd,
@@ -2738,6 +2812,13 @@ class HHDApp(tk.Tk):
             ).pack(fill="x", padx=8, pady=1)
 
     def clear_content(self):
+        binding_id = getattr(self, "_content_mousewheel_binding", None)
+        if binding_id:
+            try:
+                self.unbind("<MouseWheel>", binding_id)
+            except tk.TclError:
+                pass
+            self._content_mousewheel_binding = None
         for w in self.content.winfo_children():
             w.destroy()
 
@@ -4435,7 +4516,57 @@ class HHDApp(tk.Tk):
             font=("Segoe UI", 17, "bold"),
         ).pack(anchor="w", padx=16, pady=12)
 
-        panel, body = self.make_panel(self.content, "Treatment Entry")
+        scroll_shell = tk.Frame(self.content, bg=BLUE_BG)
+        scroll_shell.pack(fill="both", expand=True)
+        treatment_canvas = tk.Canvas(
+            scroll_shell,
+            bg=BLUE_BG,
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        treatment_scrollbar = ttk.Scrollbar(
+            scroll_shell,
+            orient="vertical",
+            command=treatment_canvas.yview,
+        )
+        treatment_canvas.configure(yscrollcommand=treatment_scrollbar.set)
+        treatment_canvas.pack(side="left", fill="both", expand=True)
+        treatment_scrollbar.pack(side="right", fill="y")
+
+        scroll_body = tk.Frame(treatment_canvas, bg=BLUE_BG)
+        scroll_window = treatment_canvas.create_window(
+            (0, 0),
+            window=scroll_body,
+            anchor="nw",
+        )
+
+        def update_treatment_scroll_region(_event=None):
+            treatment_canvas.configure(
+                scrollregion=treatment_canvas.bbox("all")
+            )
+
+        def fit_treatment_width(event):
+            treatment_canvas.itemconfigure(
+                scroll_window,
+                width=event.width,
+            )
+
+        def scroll_treatments(event):
+            if event.delta:
+                direction = -1 if event.delta > 0 else 1
+                treatment_canvas.yview_scroll(direction * 3, "units")
+
+        scroll_body.bind("<Configure>", update_treatment_scroll_region)
+        treatment_canvas.bind("<Configure>", fit_treatment_width)
+        treatment_canvas.bind("<MouseWheel>", scroll_treatments)
+        scroll_body.bind("<MouseWheel>", scroll_treatments)
+        self._content_mousewheel_binding = self.bind(
+            "<MouseWheel>",
+            scroll_treatments,
+            add="+",
+        )
+
+        panel, body = self.make_panel(scroll_body, "Treatment Entry")
         panel.pack(fill="x", padx=16, pady=(0, 12))
 
         date_var = tk.StringVar(value=iso_today())

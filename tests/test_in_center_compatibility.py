@@ -77,43 +77,49 @@ class InCenterCompatibilityTests(unittest.TestCase):
 
     def test_legacy_database_migrates_and_keeps_existing_data(self):
         database = self.make_legacy_database()
-        database.init_db()
+        try:
+            database.init_db()
 
-        legacy = database.conn.execute(
-            "SELECT * FROM session_log WHERE notes='legacy record'"
-        ).fetchone()
-        self.assertIsNotNone(legacy)
-        self.assertEqual("", legacy["pak_lot"])
+            legacy = database.conn.execute(
+                "SELECT * FROM session_log WHERE notes='legacy record'"
+            ).fetchone()
+            self.assertIsNotNone(legacy)
+            self.assertEqual("", legacy["pak_lot"])
 
-        item_columns = {
-            row["name"]
-            for row in database.conn.execute("PRAGMA table_info(items)")
-        }
-        self.assertIn("baseline_session_cutoff_id", item_columns)
-        self.assertIn("full_attempt_usage", item_columns)
+            item_columns = {
+                row["name"]
+                for row in database.conn.execute("PRAGMA table_info(items)")
+            }
+            self.assertIn("baseline_session_cutoff_id", item_columns)
+            self.assertIn("full_attempt_usage", item_columns)
+        finally:
+            database.conn.close()
 
     def test_in_center_treatment_never_deducts_inventory(self):
         database = self.make_legacy_database()
-        database.init_db()
-        item = database.conn.execute(
-            "SELECT * FROM items WHERE item_name='Legacy Cartridge'"
-        ).fetchone()
-        before = database.current_count(item)[0]
+        try:
+            database.init_db()
+            item = database.conn.execute(
+                "SELECT * FROM items WHERE item_name='Legacy Cartridge'"
+            ).fetchone()
+            before = database.current_count(item)[0]
 
-        session_id = database.add_session(
-            "2026-01-03",
-            "In Center Treatment",
-            1,
-            "clinic treatment",
-        )
-        session = database.session_by_id(session_id)
+            session_id = database.add_session(
+                "2026-01-03",
+                "In Center Treatment",
+                1,
+                "clinic treatment",
+            )
+            session = database.session_by_id(session_id)
 
-        self.assertEqual(0, session["session_equivalent"])
-        self.assertEqual(0, database.item_usage_for_session(item, session))
-        self.assertEqual(
-            before,
-            database.current_count(database.item_by_id(item["id"]))[0],
-        )
+            self.assertEqual(0, session["session_equivalent"])
+            self.assertEqual(0, database.item_usage_for_session(item, session))
+            self.assertEqual(
+                before,
+                database.current_count(database.item_by_id(item["id"]))[0],
+            )
+        finally:
+            database.conn.close()
 
 
 if __name__ == "__main__":
