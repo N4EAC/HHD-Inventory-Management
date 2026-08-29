@@ -1,6 +1,10 @@
 @echo off
 setlocal
 cd /d "%~dp0"
+set "APP_VERSION=1.5.5"
+
+echo Building HHD Inventory Manager v%APP_VERSION%
+echo.
 
 where python >nul 2>nul
 if errorlevel 1 (
@@ -28,11 +32,20 @@ if errorlevel 1 (
     exit /b 1
 )
 
+python -m unittest discover -s tests -p "test_*.py" -v
+if errorlevel 1 (
+    echo.
+    echo Compatibility tests failed. Build stopped.
+    pause
+    exit /b 1
+)
+
 if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
 
 python -m PyInstaller ^
   --noconfirm ^
+  --clean ^
   --windowed ^
   --name "HHD_Inventory_Manager" ^
   --icon=hhd_inventory_manager.ico ^
@@ -50,6 +63,6 @@ if errorlevel 1 (
 )
 
 echo.
-echo Build complete.
+echo HHD Inventory Manager v%APP_VERSION% build complete.
 echo EXE folder: dist\HHD_Inventory_Manager
 pause

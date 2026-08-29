@@ -9,7 +9,8 @@ HHD Inventory Manager was created to help home hemodialysis patients and caregiv
 - Display current quantities and supply status.
 - Estimate remaining weeks of supplies.
 - Record received inventory and quantity corrections.
-- Record completed, incomplete, extra, and missed treatments.
+- Record completed, incomplete, extra, missed, and in-center treatments.
+- In-center treatments are recorded without deducting any home inventory.
 - Automatically deduct configured supply usage from inventory.
 - Record PAK, SAK, and cartridge lot numbers.
 - Record cycler and PureFlow serial numbers.

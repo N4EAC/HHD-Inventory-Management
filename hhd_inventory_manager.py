@@ -1,7 +1,7 @@
 
 #!/usr/bin/env python3
 """
-HHD Inventory Manager v1.0.0
+HHD Inventory Manager v1.5.5
 
 Changes in v0.1.1:
 - Rename inventory items
@@ -27,7 +27,7 @@ import time
 from tkinter import ttk, messagebox, filedialog
 
 APP_NAME = "HHD Inventory Manager"
-APP_VERSION = "1.5.4"
+APP_VERSION = "1.5.5"
 DB_NAME = "hhd_inventory.db"
 SETTINGS_FILE = "hhd_inventory_settings.json"
 APP_FOLDER_NAME = "HHD Inventory Manager"
@@ -35,6 +35,22 @@ BACKUP_FOLDER_NAME = "HHD Inventory Backups"
 ROLLING_DB_BACKUP_NAME = "HHD_Inventory_Backup_Current.db"
 ROLLING_SETTINGS_BACKUP_NAME = "HHD_Settings_Backup_Current.json"
 AUTO_BACKUP_INTERVAL_MS = 10 * 60 * 1000
+
+
+def treatment_type_key(session_type):
+    """Return the stable internal category for a stored treatment label."""
+    value = str(session_type or "").strip().lower()
+    if "in center" in value or "in-center" in value:
+        return "in_center"
+    if "missed" in value:
+        return "missed"
+    if "incomplete" in value:
+        return "incomplete"
+    return "complete"
+
+
+def treatment_uses_inventory(session_type):
+    return treatment_type_key(session_type) not in {"missed", "in_center"}
 
 
 THEMES = {
@@ -473,7 +489,8 @@ class InventoryDB:
 
         # Database migration for v1.0.6. Items such as SAK can consume one
         # reusable-session slot for every attempted treatment, including an
-        # incomplete treatment. Missed treatments never consume a slot.
+        # incomplete treatment. Missed and in-center treatments never consume
+        # a slot.
         item_columns = {
             row["name"] for row in c.execute("PRAGMA table_info(items)").fetchall()
         }
@@ -880,6 +897,10 @@ class InventoryDB:
         cycler_serial="",
         pureflow_serial="",
     ):
+        if not treatment_uses_inventory(session_type):
+            # Keep imports and future clients (including macOS) inventory-safe.
+            session_equivalent = 0
+
         values = {
             "pak_lot": str(pak_lot).strip(),
             "sak_lot": str(sak_lot).strip(),
@@ -916,7 +937,7 @@ class InventoryDB:
             ),
         )
 
-        if "missed" not in str(session_type).lower():
+        if treatment_uses_inventory(session_type):
             remembered_values = [
                 ("last_pak_lot", values["pak_lot"]),
                 ("last_sak_lot", values["sak_lot"]),
@@ -951,11 +972,11 @@ class InventoryDB:
         ).fetchall()
 
     def item_usage_for_session(self, item, session):
-        stype = (session["session_type"] or "").lower()
-        if "missed" in stype:
+        treatment_key = treatment_type_key(session["session_type"])
+        if treatment_key in {"missed", "in_center"}:
             return 0.0
 
-        if "incomplete" in stype:
+        if treatment_key == "incomplete":
             row = self.conn.execute(
                 """SELECT COALESCE(SUM(units_used),0) AS total
                    FROM session_item_usage
@@ -1152,12 +1173,21 @@ class InventoryDB:
         if int(item["full_attempt_usage"] or 0) == 1:
             expression = """
                 CASE
-                    WHEN LOWER(TRIM(session_type)) LIKE 'missed%' THEN 0
+                    WHEN LOWER(TRIM(session_type)) LIKE '%missed%' THEN 0
+                    WHEN LOWER(TRIM(session_type)) LIKE '%in center%' THEN 0
+                    WHEN LOWER(TRIM(session_type)) LIKE '%in-center%' THEN 0
                     ELSE 1
                 END
             """
         else:
-            expression = "session_equivalent"
+            expression = """
+                CASE
+                    WHEN LOWER(TRIM(session_type)) LIKE '%missed%' THEN 0
+                    WHEN LOWER(TRIM(session_type)) LIKE '%in center%' THEN 0
+                    WHEN LOWER(TRIM(session_type)) LIKE '%in-center%' THEN 0
+                    ELSE session_equivalent
+                END
+            """
 
         row = self.conn.execute(
             f"""SELECT COALESCE(SUM({expression}),0) AS total
@@ -3142,13 +3172,7 @@ class HHDApp(tk.Tk):
         days = {}
         for record in self.db.sessions_between(start_date, end_date):
             day = parse_date(record["session_date"])
-            treatment_type = (record["session_type"] or "").lower()
-            if "missed" in treatment_type:
-                status = "missed"
-            elif "incomplete" in treatment_type:
-                status = "incomplete"
-            else:
-                status = "complete"
+            status = treatment_type_key(record["session_type"])
             usages = [
                 dict(row)
                 for row in self.db.session_item_usages(record["id"])
@@ -3235,6 +3259,7 @@ class HHDApp(tk.Tk):
             "complete": GREEN,
             "incomplete": YELLOW,
             "missed": RED,
+            "in_center": CYAN,
         }
 
         for treatment in treatments:
@@ -3548,12 +3573,12 @@ class HHDApp(tk.Tk):
         current_results = []
 
         def normalized_type(raw):
-            value = str(raw or "").lower()
-            if "missed" in value:
-                return "Missed"
-            if "incomplete" in value:
-                return "Incomplete"
-            return "Completed"
+            return {
+                "missed": "Missed",
+                "incomplete": "Incomplete",
+                "in_center": "In Center",
+                "complete": "Completed",
+            }[treatment_type_key(raw)]
 
         def run_search(*_):
             nonlocal current_results
@@ -3773,7 +3798,7 @@ class HHDApp(tk.Tk):
         tk.Label(controls,textvariable=title_var,bg=BLUE_PANEL,fg=TEXT,font=("Segoe UI",14,"bold")).pack(side="left",expand=True)
         legend=tk.Frame(self.content,bg=BLUE_BG); legend.pack(fill="x",padx=18,pady=(0,8))
         tk.Label(legend,text="Legend:",bg=BLUE_BG,fg=TEXT,font=("Segoe UI",10,"bold")).pack(side="left",padx=(0,10))
-        for label,color in [("Complete",GREEN),("Incomplete",YELLOW),("Missed",RED)]:
+        for label,color in [("Complete",GREEN),("Incomplete",YELLOW),("Missed",RED),("In Center",CYAN)]:
             tk.Label(legend,text=f"  {label}  ",bg=color,fg="#111111",font=("Segoe UI",10,"bold"),padx=8,pady=4).pack(side="left",padx=(0,10))
         calendar_panel,calendar_body=self.make_panel(self.content,"Calendar")
         calendar_panel.pack(fill="both",expand=True,padx=16,pady=(0,14))
@@ -3789,8 +3814,8 @@ class HHDApp(tk.Tk):
             fg=TEXT if current_month else MUTED
             tk.Label(cell,text=str(day_value.day),bg=CALENDAR_EMPTY,fg=fg,font=("Segoe UI",12,"bold"),anchor="nw").pack(fill="x",padx=6,pady=(5,2))
             bands=tk.Frame(cell,bg=CALENDAR_EMPTY); bands.pack(fill="both",expand=True,padx=3,pady=(0,3))
-            colors={"complete":GREEN,"incomplete":YELLOW,"missed":RED}
-            names={"complete":"Complete","incomplete":"Incomplete","missed":"Missed"}
+            colors={"complete":GREEN,"incomplete":YELLOW,"missed":RED,"in_center":CYAN}
+            names={"complete":"Complete","incomplete":"Incomplete","missed":"Missed","in_center":"In Center"}
             for tr in treatments:
                 band=tk.Frame(bands,bg=colors[tr["status"]])
                 band.pack(fill="both",expand=True,pady=1)
@@ -3868,12 +3893,12 @@ class HHDApp(tk.Tk):
                         "SAK lot#", "Cartridge lot#", "Notes",
                     ])
                     for record in rows:
-                        raw = str(record["session_type"] or "").lower()
-                        treatment_type = (
-                            "Missed" if "missed" in raw else
-                            "Incomplete" if "incomplete" in raw else
-                            "Completed"
-                        )
+                        treatment_type = {
+                            "missed": "Missed",
+                            "incomplete": "Incomplete",
+                            "in_center": "In Center",
+                            "complete": "Completed",
+                        }[treatment_type_key(record["session_type"])]
                         writer.writerow([
                             record["session_date"], treatment_type,
                             record["pak_lot"], record["sak_lot"],
@@ -4447,6 +4472,7 @@ class HHDApp(tk.Tk):
                         "Extra Treatment",
                         "Missed Treatment",
                         "Incomplete Treatment",
+                        "In Center Treatment",
                     ],
                     width=30,
                     state="readonly",
@@ -4717,9 +4743,10 @@ class HHDApp(tk.Tk):
             treatment_type = type_var.get()
             incomplete = treatment_type == "Incomplete Treatment"
             missed = treatment_type == "Missed Treatment"
+            in_center = treatment_type == "In Center Treatment"
 
             equiv_var.set(
-                "0" if incomplete or missed else "1"
+                "0" if incomplete or missed or in_center else "1"
             )
 
             item_combo.configure(
@@ -4737,7 +4764,7 @@ class HHDApp(tk.Tk):
 
             for entry in identity_entries:
                 entry.configure(
-                    state="disabled" if missed else "normal"
+                    state="disabled" if missed or in_center else "normal"
                 )
 
         type_var.trace_add("write", adjust)
@@ -4760,6 +4787,7 @@ class HHDApp(tk.Tk):
                         "(0.5 to 10) have been entered."
                     )
 
+                record_identity = treatment_uses_inventory(session_type)
                 session_id = self.db.add_session(
                     parse_date(date_var.get()).isoformat(),
                     stored_session_type,
@@ -4767,11 +4795,26 @@ class HHDApp(tk.Tk):
                     self.timestamp_note_entry(
                         notes.get("1.0", "end-1c")
                     ),
-                    pak_lot=identity_vars["pak_lot"].get(),
-                    sak_lot=identity_vars["sak_lot"].get(),
-                    cartridge_lot=identity_vars["cartridge_lot"].get(),
-                    cycler_serial=identity_vars["cycler_serial"].get(),
-                    pureflow_serial=identity_vars["pureflow_serial"].get(),
+                    pak_lot=(
+                        identity_vars["pak_lot"].get()
+                        if record_identity else ""
+                    ),
+                    sak_lot=(
+                        identity_vars["sak_lot"].get()
+                        if record_identity else ""
+                    ),
+                    cartridge_lot=(
+                        identity_vars["cartridge_lot"].get()
+                        if record_identity else ""
+                    ),
+                    cycler_serial=(
+                        identity_vars["cycler_serial"].get()
+                        if record_identity else ""
+                    ),
+                    pureflow_serial=(
+                        identity_vars["pureflow_serial"].get()
+                        if record_identity else ""
+                    ),
                 )
 
                 if "Incomplete" in session_type:
@@ -4989,9 +5032,12 @@ class HHDApp(tk.Tk):
                     "will be restored exactly:\n"
                     + "\n".join(restored_lines)
                 )
-            elif "missed" in treatment_name.lower():
+            elif treatment_type_key(record["session_type"]) in {
+                "missed",
+                "in_center",
+            }:
                 restoration_text = (
-                    "\n\nThis missed treatment did not deduct "
+                    "\n\nThis treatment did not deduct "
                     "inventory units."
                 )
             else:
