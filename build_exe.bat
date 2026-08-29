@@ -1,7 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-set "APP_VERSION=1.5.5"
+set "APP_VERSION=1.5.6"
 
 echo Building HHD Inventory Manager v%APP_VERSION%
 echo.
@@ -28,6 +28,14 @@ python -m py_compile hhd_inventory_manager.py
 if errorlevel 1 (
     echo.
     echo Python syntax check failed. Build stopped.
+    pause
+    exit /b 1
+)
+
+for /f "delims=" %%V in ('python -c "import hhd_inventory_manager as app; print(app.APP_VERSION)"') do set "SOURCE_VERSION=%%V"
+if not "%SOURCE_VERSION%"=="%APP_VERSION%" (
+    echo.
+    echo Version mismatch: build script is %APP_VERSION% but source is %SOURCE_VERSION%.
     pause
     exit /b 1
 )

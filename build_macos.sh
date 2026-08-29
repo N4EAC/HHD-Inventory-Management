@@ -2,7 +2,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
-APP_VERSION="1.5.5"
+APP_VERSION="1.5.6"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 echo "Building HHD Inventory Manager v${APP_VERSION} for macOS"
@@ -24,6 +24,12 @@ fi
 
 "$PYTHON_BIN" -m unittest discover -s tests -p "test_*.py" -v
 "$PYTHON_BIN" -m py_compile hhd_inventory_manager.py
+
+SOURCE_VERSION=$("$PYTHON_BIN" -c 'import hhd_inventory_manager as app; print(app.APP_VERSION)')
+if [[ "$SOURCE_VERSION" != "$APP_VERSION" ]]; then
+    echo "Version mismatch: build script is ${APP_VERSION} but source is ${SOURCE_VERSION}."
+    exit 1
+fi
 
 ICON_FILE="$(pwd)/build/macos/hhd_inventory_manager.icns"
 mkdir -p "$(dirname "$ICON_FILE")"

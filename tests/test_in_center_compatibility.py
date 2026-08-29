@@ -121,6 +121,34 @@ class InCenterCompatibilityTests(unittest.TestCase):
         finally:
             database.conn.close()
 
+    def test_schedule_changes_forecast_not_inventory_count(self):
+        database = self.make_legacy_database()
+        try:
+            database.init_db()
+            item = database.conn.execute(
+                "SELECT * FROM items WHERE item_name='Legacy Cartridge'"
+            ).fetchone()
+            current_before = database.current_count(item)[0]
+
+            database.set_setting("sessions_per_week", 4)
+            four_session_forecast = database.weeks_remaining(
+                item,
+                current_before,
+            )
+            database.set_setting("sessions_per_week", 5)
+            five_session_forecast = database.weeks_remaining(
+                item,
+                current_before,
+            )
+
+            self.assertEqual(
+                current_before,
+                database.current_count(item)[0],
+            )
+            self.assertLess(five_session_forecast, four_session_forecast)
+        finally:
+            database.conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()

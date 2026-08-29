@@ -5,3 +5,4 @@ dist/
 *.spec
 installer_output/
 HHD_Inventory_Manager_Setup_v*.exe
+.DS_Store

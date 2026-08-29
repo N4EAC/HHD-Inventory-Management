@@ -1,7 +1,7 @@
 
 #!/usr/bin/env python3
 """
-HHD Inventory Manager v1.5.5
+HHD Inventory Manager v1.5.6
 
 Changes in v0.1.1:
 - Rename inventory items
@@ -28,7 +28,7 @@ import time
 from tkinter import ttk, messagebox, filedialog
 
 APP_NAME = "HHD Inventory Manager"
-APP_VERSION = "1.5.5"
+APP_VERSION = "1.5.6"
 DB_NAME = "hhd_inventory.db"
 SETTINGS_FILE = "hhd_inventory_settings.json"
 APP_FOLDER_NAME = "HHD Inventory Manager"
@@ -238,29 +238,6 @@ try:
 except Exception:
     pass
 
-DEFAULT_ITEMS = [
-    (GROUP_NX, "SAK", 0, 4, 8, 1.0, 0.0, 2.0, 0, 1),
-    (GROUP_NX, "PAK", 0, 1, 2, 0.0, 0.0, 1.0, 75, 0),
-    (GROUP_NX, "Cartridge", 0, 8, 12, 1.0, 0.0, 1.0, 0, 1),
-    (GROUP_NX, "Dialysate Hanging Bags (Emergency Bags)", 0, 24, 48, 6.0, 0.0, 1.0, 0, 0),
-    (GROUP_NX, "Warmer Lines", 0, 4, 8, 1.0, 0.0, 1.0, 0, 0),
-
-    (GROUP_DV, "Heparin", 0, 2, 4, 1.0, 0.0, 1.0, 0, 1),
-    (GROUP_DV, "10CC Syringe", 0, 20, 40, 5.0, 0.0, 1.0, 0, 1),
-    (GROUP_DV, "Medical Gloves", 0, 20, 40, 1.0, 0.0, 1.0, 0, 1),
-    (GROUP_DV, "Syringe Needles", 0, 20, 40, 1.0, 0.0, 1.0, 0, 1),
-    (GROUP_DV, "15 Gauge Tulip Needles (pair)", 0, 4, 8, 1.0, 0.0, 1.0, 0, 1),
-    (GROUP_DV, "15 Gauge Tulip Needles (singles)", 0, 8, 16, 2.0, 0.0, 1.0, 0, 1),
-    (GROUP_DV, "Alcohol Pads", 0, 32, 64, 4.0, 0.0, 1.0, 0, 1),
-    (GROUP_DV, "Iodine Pads", 0, 16, 32, 2.0, 0.0, 1.0, 0, 1),
-    (GROUP_DV, "Saline bags", 0, 4, 8, 1.0, 0.0, 1.0, 0, 1),
-    (GROUP_DV, "Male-to-Male connector (Mr. Peanut)", 0, 4, 8, 1.0, 0.0, 1.0, 0, 1),
-    (GROUP_DV, "2x2 gauze", 0, 20, 40, 2.0, 0.0, 1.0, 0, 1),
-    (GROUP_DV, "4x4 gauze", 0, 20, 40, 2.0, 0.0, 1.0, 0, 1),
-    (GROUP_DV, "Paper Towels", 0, 1, 2, 0.0, 1.0, 1.0, 0, 0),
-    (GROUP_DV, "Chloramine Test Strips", 0, 8, 16, 1.0, 0.0, 1.0, 0, 1),
-]
-
 def app_dir():
     return getattr(
         sys,
@@ -274,6 +251,11 @@ def user_data_dir():
     Keep one database format across platforms while using each operating
     system's normal writable application-data location.
     """
+    override = os.environ.get("HHDIM_DATA_DIR")
+    if override:
+        os.makedirs(override, exist_ok=True)
+        return override
+
     home = os.path.expanduser("~")
     if os.name == "nt":
         base = os.environ.get("LOCALAPPDATA") or os.path.join(
@@ -416,12 +398,23 @@ def validate_half_unit(value, field_name="Value"):
         raise ValueError(f"{field_name} must be a whole number or end in .5.")
     return normalized
 
+
+def validate_sessions_per_week(value):
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError):
+        raise ValueError("Scheduled treatments per week must be a whole number.")
+    if number < 1 or number > 14:
+        raise ValueError("Scheduled treatments per week must be between 1 and 14.")
+    return number
+
 class InventoryDB:
     def __init__(self):
         self.migrate_legacy_database_if_needed()
+        self.is_new_database = not os.path.exists(db_path())
         self.conn = sqlite3.connect(db_path())
         self.conn.row_factory = sqlite3.Row
-        self.init_db()
+        self.init_db(new_database=self.is_new_database)
 
     def migrate_legacy_database_if_needed(self):
         """Move/copy an older database from the app folder to AppData if needed."""
@@ -433,7 +426,7 @@ class InventoryDB:
         except Exception:
             pass
 
-    def init_db(self):
+    def init_db(self, new_database=False):
         c = self.conn.cursor()
         c.executescript("""
         CREATE TABLE IF NOT EXISTS settings (
@@ -574,20 +567,12 @@ class InventoryDB:
             "last_pureflow_serial": "",
             "inventory_reconciliation_v15": "0",
             "inventory_last_verified_at": "",
+            "first_run_setup_complete": "0" if new_database else "1",
         }
         for k, v in defaults.items():
             c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
 
-        for row in DEFAULT_ITEMS:
-            c.execute("""
-                INSERT OR IGNORE INTO items(
-                    group_name,item_name,baseline_units,baseline_date,min_threshold,low_threshold,
-                    units_per_session,units_per_week,reusable_sessions,lifespan_days,auto_session_usage,active
-                )
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,1)
-            """, (row[0], row[1], row[2], iso_today(), row[3], row[4], row[5], row[6], row[7], row[8], row[9]))
-
-        # Enable the rule for the default/existing SAK item. Once enabled, the
+        # Enable the rule for an existing SAK item. Once enabled, the
         # database flag remains with the item even if the user renames it.
         c.execute(
             """UPDATE items
@@ -1745,6 +1730,7 @@ class ColorButton(tk.Label):
 class HHDApp(tk.Tk):
     def __init__(self):
         super().__init__()
+        self.startup_cancelled = False
         self.db = InventoryDB()
         self.settings_data = self.load_local_settings()
         self.current_theme = self.settings_data.get("theme", "Medical Blue")
@@ -1781,6 +1767,13 @@ class HHDApp(tk.Tk):
         self.style = ttk.Style()
         self.style.theme_use("clam")
         self.configure_styles()
+
+        if self.db.get_setting("first_run_setup_complete", "1") != "1":
+            self.run_first_time_setup()
+            if self.startup_cancelled:
+                self.db.close()
+                self.destroy()
+                return
 
         self.run_startup_database_verification()
 
@@ -1821,6 +1814,460 @@ class HHDApp(tk.Tk):
             150,
             lambda: request_windows_titlebar(self.winfo_id()),
         )
+
+    def run_first_time_setup(self):
+        """Guide a new user through identity, import, and initial inventory."""
+        win = tk.Toplevel(self)
+        win.title(f"Welcome to {APP_NAME}")
+        win.configure(bg=BLUE_BG)
+        win.resizable(False, False)
+        win.transient(self)
+        self.center_child_window(win, 720, 620)
+        win.grab_set()
+
+        outer = tk.Frame(
+            win,
+            bg=BLUE_PANEL,
+            highlightbackground=BORDER,
+            highlightthickness=1,
+        )
+        outer.pack(fill="both", expand=True, padx=1, pady=1)
+
+        header_var = tk.StringVar(value="Welcome")
+        tk.Label(
+            outer,
+            textvariable=header_var,
+            bg=BLUE_HEADER,
+            fg=HEADER_TEXT,
+            font=("Segoe UI", 16, "bold"),
+            anchor="w",
+            padx=22,
+            pady=14,
+        ).pack(fill="x")
+
+        page = tk.Frame(outer, bg=BLUE_PANEL)
+        page.pack(fill="both", expand=True, padx=24, pady=22)
+
+        saved_patient = self.db.get_setting("patient_name", "")
+        saved_provider_one = self.db.get_setting(
+            "group_nx_display_name",
+            GROUP_NX,
+        )
+        saved_provider_two = self.db.get_setting(
+            "group_dv_display_name",
+            GROUP_DV,
+        )
+        patient_var = tk.StringVar(
+            value="" if saved_patient == "Patient Name" else saved_patient
+        )
+        provider_one_var = tk.StringVar(
+            value="NxStage" if saved_provider_one == GROUP_NX else saved_provider_one
+        )
+        provider_two_var = tk.StringVar(
+            value="DaVita" if saved_provider_two == GROUP_DV else saved_provider_two
+        )
+        sessions_per_week_var = tk.StringVar(
+            value=self.db.get_setting("sessions_per_week", "4")
+        )
+        first_session_day_var = tk.StringVar(
+            value=self.db.get_setting("first_session_day", "Sunday")
+        )
+        provider_var = tk.StringVar()
+        item_name_var = tk.StringVar()
+        units_var = tk.StringVar(value="0")
+        added_items = []
+
+        def clear_page():
+            for child in page.winfo_children():
+                child.destroy()
+
+        def finish_setup():
+            self.db.set_setting("first_run_setup_complete", "1")
+            try:
+                win.grab_release()
+            except tk.TclError:
+                pass
+            win.destroy()
+
+        def setup_later():
+            leave_now = messagebox.askyesno(
+                "Set Up Later",
+                "Exit HHD Inventory Manager and finish setup later?\n\n"
+                "No setup will be marked complete. The setup assistant will "
+                "open again the next time HHDIM starts.",
+                parent=win,
+            )
+            if not leave_now:
+                return
+            self.startup_cancelled = True
+            try:
+                win.grab_release()
+            except tk.TclError:
+                pass
+            win.destroy()
+
+        def import_existing_database():
+            filename = filedialog.askopenfilename(
+                parent=win,
+                title="Import Existing HHD Inventory Database",
+                filetypes=[
+                    ("SQLite Database", "*.db"),
+                    ("All Files", "*.*"),
+                ],
+            )
+            if not filename:
+                return
+            try:
+                self.db.import_database(filename)
+                self.db.set_setting("first_run_setup_complete", "1")
+                self.db.is_new_database = False
+                messagebox.showinfo(
+                    APP_NAME,
+                    "Your existing database was imported successfully.",
+                    parent=win,
+                )
+                win.destroy()
+            except Exception as ex:
+                messagebox.showerror(
+                    APP_NAME,
+                    f"Database import failed:\n{ex}",
+                    parent=win,
+                )
+
+        def show_welcome():
+            clear_page()
+            header_var.set("Welcome to HHD Inventory Manager")
+            tk.Label(
+                page,
+                text=(
+                    "No existing HHD Inventory Manager database was found.\n\n"
+                    "This short setup will collect the patient and provider "
+                    "names, then optionally help you enter your current "
+                    "inventory. You can add or change inventory later from "
+                    "Settings / Items."
+                ),
+                bg=BLUE_PANEL,
+                fg=TEXT,
+                justify="left",
+                anchor="nw",
+                wraplength=640,
+                font=("Segoe UI", 11),
+            ).pack(fill="x", pady=(10, 26))
+            self.button(
+                page,
+                "Import an Existing Database",
+                import_existing_database,
+            ).pack(fill="x", pady=(0, 12))
+            self.button(
+                page,
+                "Set Up as a New User",
+                show_identity,
+            ).pack(fill="x")
+            self.button(
+                page,
+                "Set Up Later — Exit HHDIM",
+                setup_later,
+            ).pack(fill="x", pady=(12, 0))
+
+        def show_identity():
+            clear_page()
+            header_var.set("Patient and Providers")
+            tk.Label(
+                page,
+                text=(
+                    "Enter the names you want displayed throughout the app. "
+                    "Provider examples are NxStage and DaVita."
+                ),
+                bg=BLUE_PANEL,
+                fg=TEXT,
+                justify="left",
+                wraplength=640,
+                font=("Segoe UI", 11),
+            ).pack(fill="x", pady=(0, 18))
+
+            form = tk.Frame(page, bg=BLUE_PANEL)
+            form.pack(fill="x")
+            fields = [
+                ("Patient name", patient_var),
+                ("Provider name 1", provider_one_var),
+                ("Provider name 2", provider_two_var),
+            ]
+            first_entry = None
+            for row_index, (label, variable) in enumerate(fields):
+                tk.Label(
+                    form,
+                    text=label,
+                    bg=BLUE_PANEL,
+                    fg=TEXT,
+                    anchor="w",
+                ).grid(row=row_index, column=0, sticky="w", padx=(0, 12), pady=8)
+                entry = tk.Entry(
+                    form,
+                    textvariable=variable,
+                    bg=INPUT_BG,
+                    fg=TEXT,
+                    insertbackground=TEXT,
+                    relief="solid",
+                    bd=1,
+                    width=42,
+                )
+                entry.grid(row=row_index, column=1, sticky="ew", pady=8)
+                if first_entry is None:
+                    first_entry = entry
+            form.columnconfigure(1, weight=1)
+
+            tk.Label(
+                form,
+                text="Scheduled treatments per week",
+                bg=BLUE_PANEL,
+                fg=TEXT,
+                anchor="w",
+            ).grid(row=3, column=0, sticky="w", padx=(0, 12), pady=8)
+            tk.Entry(
+                form,
+                textvariable=sessions_per_week_var,
+                bg=INPUT_BG,
+                fg=TEXT,
+                insertbackground=TEXT,
+                relief="solid",
+                bd=1,
+                width=42,
+            ).grid(row=3, column=1, sticky="ew", pady=8)
+
+            tk.Label(
+                form,
+                text="First treatment day",
+                bg=BLUE_PANEL,
+                fg=TEXT,
+                anchor="w",
+            ).grid(row=4, column=0, sticky="w", padx=(0, 12), pady=8)
+            ttk.Combobox(
+                form,
+                textvariable=first_session_day_var,
+                values=[
+                    "Sunday", "Monday", "Tuesday", "Wednesday",
+                    "Thursday", "Friday", "Saturday",
+                ],
+                state="readonly",
+                width=39,
+            ).grid(row=4, column=1, sticky="ew", pady=8)
+
+            tk.Label(
+                page,
+                text=(
+                    "Why we ask: your scheduled treatments per week are used "
+                    "to calculate the estimated Weeks Remaining for supplies. "
+                    "The schedule never deducts inventory automatically; only "
+                    "recorded treatments and configured weekly-use items do."
+                ),
+                bg=BLUE_PANEL,
+                fg=MUTED,
+                justify="left",
+                anchor="nw",
+                wraplength=640,
+                font=("Segoe UI", 9),
+            ).pack(fill="x", pady=(14, 0))
+
+            def save_identity():
+                patient = patient_var.get().strip()
+                provider_one = provider_one_var.get().strip()
+                provider_two = provider_two_var.get().strip()
+                if not patient or not provider_one or not provider_two:
+                    messagebox.showerror(
+                        APP_NAME,
+                        "Patient and both provider names are required.",
+                        parent=win,
+                    )
+                    return
+                if provider_one.casefold() == provider_two.casefold():
+                    messagebox.showerror(
+                        APP_NAME,
+                        "Provider names must be different.",
+                        parent=win,
+                    )
+                    return
+                try:
+                    sessions_per_week = validate_sessions_per_week(
+                        sessions_per_week_var.get()
+                    )
+                except ValueError as ex:
+                    messagebox.showerror(APP_NAME, str(ex), parent=win)
+                    return
+                self.db.set_setting("patient_name", patient)
+                self.db.set_setting("group_nx_display_name", provider_one)
+                self.db.set_setting("group_dv_display_name", provider_two)
+                self.db.set_setting("sessions_per_week", sessions_per_week)
+                self.db.set_setting(
+                    "first_session_day",
+                    first_session_day_var.get(),
+                )
+                provider_var.set(provider_one)
+                show_inventory_choice()
+
+            actions = tk.Frame(page, bg=BLUE_PANEL)
+            actions.pack(side="bottom", fill="x", pady=(26, 0))
+            self.button(actions, "Back", show_welcome).pack(side="left")
+            self.button(actions, "Continue", save_identity).pack(side="right")
+            if first_entry:
+                first_entry.focus_set()
+
+        def show_inventory_choice():
+            clear_page()
+            header_var.set("Initial Inventory")
+            tk.Label(
+                page,
+                text=(
+                    "Would you like to enter your current inventory now?\n\n"
+                    "You can skip this step and add items later from Settings / "
+                    "Items or Received Inventory."
+                ),
+                bg=BLUE_PANEL,
+                fg=TEXT,
+                justify="left",
+                anchor="nw",
+                wraplength=640,
+                font=("Segoe UI", 11),
+            ).pack(fill="x", pady=(20, 30))
+            self.button(
+                page,
+                "Enter Initial Inventory",
+                show_inventory_entry,
+            ).pack(fill="x", pady=(0, 12))
+            self.button(
+                page,
+                "Skip — I’ll Add Inventory Later",
+                finish_setup,
+            ).pack(fill="x")
+
+        def show_inventory_entry():
+            clear_page()
+            header_var.set("Enter Initial Inventory")
+            provider_names = [
+                self.db.get_setting("group_nx_display_name", GROUP_NX),
+                self.db.get_setting("group_dv_display_name", GROUP_DV),
+            ]
+            if provider_var.get() not in provider_names:
+                provider_var.set(provider_names[0])
+
+            tk.Label(
+                page,
+                text=(
+                    "Add one item at a time. Current units may be a whole or "
+                    "half unit. You can configure usage and warning levels later."
+                ),
+                bg=BLUE_PANEL,
+                fg=TEXT,
+                justify="left",
+                wraplength=640,
+                font=("Segoe UI", 10),
+            ).pack(fill="x", pady=(0, 14))
+
+            form = tk.Frame(page, bg=BLUE_PANEL)
+            form.pack(fill="x")
+            tk.Label(form, text="Provider", bg=BLUE_PANEL, fg=TEXT).grid(
+                row=0, column=0, sticky="w", padx=(0, 12), pady=7
+            )
+            ttk.Combobox(
+                form,
+                textvariable=provider_var,
+                values=provider_names,
+                state="readonly",
+                width=34,
+            ).grid(row=0, column=1, sticky="ew", pady=7)
+            tk.Label(form, text="Item name", bg=BLUE_PANEL, fg=TEXT).grid(
+                row=1, column=0, sticky="w", padx=(0, 12), pady=7
+            )
+            item_entry = tk.Entry(
+                form,
+                textvariable=item_name_var,
+                bg=INPUT_BG,
+                fg=TEXT,
+                insertbackground=TEXT,
+                relief="solid",
+                bd=1,
+            )
+            item_entry.grid(row=1, column=1, sticky="ew", pady=7)
+            tk.Label(form, text="Current units", bg=BLUE_PANEL, fg=TEXT).grid(
+                row=2, column=0, sticky="w", padx=(0, 12), pady=7
+            )
+            tk.Entry(
+                form,
+                textvariable=units_var,
+                bg=INPUT_BG,
+                fg=TEXT,
+                insertbackground=TEXT,
+                relief="solid",
+                bd=1,
+            ).grid(row=2, column=1, sticky="ew", pady=7)
+            form.columnconfigure(1, weight=1)
+
+            added_var = tk.StringVar()
+            tk.Label(
+                page,
+                textvariable=added_var,
+                bg=BLUE_PANEL,
+                fg=CYAN,
+                justify="left",
+                anchor="nw",
+                wraplength=640,
+            ).pack(fill="x", pady=(18, 8))
+
+            def refresh_added_items():
+                if added_items:
+                    added_var.set(
+                        "Added this setup:\n" + "\n".join(
+                            f"• {provider}: {name} — {units:g} units"
+                            for provider, name, units in added_items
+                        )
+                    )
+                else:
+                    added_var.set("No items added yet.")
+
+            def add_inventory_item():
+                try:
+                    name = item_name_var.get().strip()
+                    units = validate_half_unit(
+                        units_var.get(),
+                        "Current units",
+                    )
+                    if units < 0:
+                        raise ValueError("Current units cannot be negative.")
+                    internal_group = self.internal_group_from_display(
+                        provider_var.get()
+                    )
+                    if not internal_group:
+                        raise ValueError("Select an inventory provider.")
+                    self.db.add_item(
+                        internal_group,
+                        name,
+                        baseline_units=units,
+                        baseline_date=iso_today(),
+                        auto_session_usage=0,
+                    )
+                    added_items.append((provider_var.get(), name, units))
+                    item_name_var.set("")
+                    units_var.set("0")
+                    refresh_added_items()
+                    item_entry.focus_set()
+                except sqlite3.IntegrityError:
+                    messagebox.showerror(
+                        APP_NAME,
+                        "That item already exists for the selected provider.",
+                        parent=win,
+                    )
+                except Exception as ex:
+                    messagebox.showerror(APP_NAME, str(ex), parent=win)
+
+            refresh_added_items()
+            actions = tk.Frame(page, bg=BLUE_PANEL)
+            actions.pack(side="bottom", fill="x", pady=(20, 0))
+            self.button(actions, "Add Item", add_inventory_item).pack(side="left")
+            self.button(actions, "I’m Done", finish_setup).pack(side="right")
+            item_entry.focus_set()
+
+        win.protocol("WM_DELETE_WINDOW", setup_later)
+        show_welcome()
+        self.wait_window(win)
 
     def run_startup_database_verification(self):
         # The main window must be realized before positioning a transient
@@ -5421,4 +5868,5 @@ class HHDApp(tk.Tk):
 
 if __name__ == "__main__":
     app = HHDApp()
-    app.mainloop()
+    if not app.startup_cancelled:
+        app.mainloop()
