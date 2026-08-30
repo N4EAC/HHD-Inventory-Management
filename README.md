@@ -9,9 +9,22 @@ Release packages are available for Windows and Apple-silicon Macs, with Ubuntu
 24.04 planned next. All platforms use the same SQLite database format so
 databases can be exported and imported between systems.
 
+**[Download HHD Inventory Manager v1.5.7](https://github.com/N4EAC/HHD-Inventory-Management/releases/tag/v1.5.7)**
+
+- Windows 10/11: `HHD_Inventory_Manager_Setup_v1.5.7.1.exe`
+- Apple-silicon macOS: `HHD_Inventory_Manager_macOS_arm64_v1.5.7.dmg`
+
+The current macOS package is not Apple-notarized. macOS may require the user to
+approve the application in Privacy & Security before its first launch.
+
 <img width="1584" height="988" alt="image" src="https://github.com/user-attachments/assets/3e618332-5457-4214-80de-8d2de28d12d1" />
 
 ## New in version 1.5.7
+
+Version 1.5.7 expands Complete Treatment inventory tracking, improves the
+native macOS experience, and adds the C77 visual theme. See the
+[v1.5.7 release page](https://github.com/N4EAC/HHD-Inventory-Management/releases/tag/v1.5.7)
+for installers and release notes.
 
 - Complete treatments now record a **Warmer Line lot number** and the number
   of **Hanging bags used** from 0 through 10.
@@ -35,6 +48,12 @@ databases can be exported and imported between systems.
   Settings.
 - Treatment history, calendar exports, and lot-number search now include the
   new Warmer Line and Hanging Bags information.
+- macOS now has native application, File, Treatment, Inventory, and Help menus,
+  including working About and Settings commands.
+- The Incomplete Treatment item-usage fields are shown only when Incomplete
+  Treatment is selected.
+- Added the distressed post-apocalyptic C77 theme with accessible button and
+  treatment-status colors.
 
 ## New in version 1.5.6
 
