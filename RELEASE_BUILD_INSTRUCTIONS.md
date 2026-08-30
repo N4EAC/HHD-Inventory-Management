@@ -13,7 +13,7 @@ To create the Windows installer:
 5. Compile the script.
 6. The installer will be created in:
 
-   installer_output\HHD_Inventory_Manager_Setup_v1.5.6.1.exe
+   installer_output\HHD_Inventory_Manager_Setup_v1.5.7.1.exe
 
 The program installs to Program Files. User data is stored in:
 

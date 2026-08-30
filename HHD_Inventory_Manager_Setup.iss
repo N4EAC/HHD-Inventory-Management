@@ -1,11 +1,11 @@
 ; HHD Inventory Manager Inno Setup Script
 ; Program Files installer
-; Release 1.5.6
+; Release 1.5.7
 ;
 ; Run build_exe.bat first, then compile this script with Inno Setup.
 
 #define MyAppName "HHD Inventory Manager"
-#define MyAppVersion "1.5.6"
+#define MyAppVersion "1.5.7"
 #define MyAppPublisher "Eduardo A. de Carvalho"
 #define MyAppExeName "HHD_Inventory_Manager.exe"
 #define MyAppBuildDir "dist\HHD_Inventory_Manager"
@@ -25,7 +25,7 @@ DisableProgramGroupPage=yes
 DisableDirPage=no
 
 OutputDir=installer_output
-OutputBaseFilename=HHD_Inventory_Manager_Setup_v1.5.6.1
+OutputBaseFilename=HHD_Inventory_Manager_Setup_v1.5.7.1
 SetupIconFile=hhd_inventory_manager.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 

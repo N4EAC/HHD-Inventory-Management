@@ -1,7 +1,7 @@
 
 #!/usr/bin/env python3
 """
-HHD Inventory Manager v1.5.6
+HHD Inventory Manager v1.5.7
 
 Changes in v0.1.1:
 - Rename inventory items
@@ -30,7 +30,7 @@ import time
 from tkinter import ttk, messagebox, filedialog
 
 APP_NAME = "HHD Inventory Manager"
-APP_VERSION = "1.5.6"
+APP_VERSION = "1.5.7"
 DB_NAME = "hhd_inventory.db"
 SETTINGS_FILE = "hhd_inventory_settings.json"
 APP_FOLDER_NAME = "HHD Inventory Manager"
@@ -38,6 +38,16 @@ BACKUP_FOLDER_NAME = "HHD Inventory Backups"
 ROLLING_DB_BACKUP_NAME = "HHD_Inventory_Backup_Current.db"
 ROLLING_SETTINGS_BACKUP_NAME = "HHD_Settings_Backup_Current.json"
 AUTO_BACKUP_INTERVAL_MS = 10 * 60 * 1000
+INVENTORY_TYPE_STANDARD = "standard"
+INVENTORY_TYPE_SAK = "sak"
+INVENTORY_TYPE_HANGING_BAGS = "hanging_bags"
+INVENTORY_TYPE_WARMER_LINES = "warmer_lines"
+INVENTORY_TYPE_LABELS = {
+    INVENTORY_TYPE_STANDARD: "Standard inventory item",
+    INVENTORY_TYPE_SAK: "SAK",
+    INVENTORY_TYPE_HANGING_BAGS: "Hanging bags",
+    INVENTORY_TYPE_WARMER_LINES: "Warmer lines",
+}
 
 
 def treatment_type_key(session_type):
@@ -54,6 +64,44 @@ def treatment_type_key(session_type):
 
 def treatment_uses_inventory(session_type):
     return treatment_type_key(session_type) not in {"missed", "in_center"}
+
+
+def validate_hanging_bags_used(value):
+    try:
+        count = int(str(value).strip())
+    except (TypeError, ValueError):
+        raise ValueError("Hanging bags used must be a whole number from 0 to 10.")
+    if str(count) != str(value).strip() or count < 0 or count > 10:
+        raise ValueError("Hanging bags used must be a whole number from 0 to 10.")
+    return count
+
+
+def validate_treatment_time(value):
+    text = str(value or "").strip()
+    try:
+        return datetime.strptime(text, "%H:%M").strftime("%H:%M")
+    except ValueError:
+        raise ValueError("Treatment time must use 24-hour HH:MM format.")
+
+
+def treatment_datetime(session):
+    treatment_time = str(session["treatment_time"] or "").strip()
+    if not treatment_time:
+        return None
+    return datetime.strptime(
+        f"{session['session_date']} {treatment_time}",
+        "%Y-%m-%d %H:%M",
+    )
+
+
+def validate_sak_hours_remaining(value):
+    try:
+        hours = int(str(value).strip())
+    except (TypeError, ValueError):
+        raise ValueError("SAK hours left must be a whole number from 1 to 80.")
+    if str(hours) != str(value).strip() or hours < 1 or hours > 80:
+        raise ValueError("SAK hours left must be a whole number from 1 to 80.")
+    return hours
 
 
 THEMES = {
@@ -194,6 +242,35 @@ THEMES = {
         "calendar_empty": "#12172A",
         "dark_titlebar": True,
     },
+    "C77": {
+        # Worn yellow hardware, black keys, exposed metal, and utility lights.
+        "bg": "#11120F",
+        "panel": "#1B1C17",
+        "panel2": "#25261E",
+        "header": "#D0CF2D",
+        "accent": "#E7E21E",
+        "text": "#F0EED9",
+        "muted": "#AAA98F",
+        "green": "#59D9C8",
+        "yellow": "#E7E21E",
+        "red": "#FF4B86",
+        "border": "#777629",
+        "input": "#0C0D0B",
+        "button": "#A8A72A",
+        "button_hover": "#E7E21E",
+        "panel_title": "#303025",
+        "status": "#090A08",
+        "chart": "#0E0F0C",
+        "select": "#D0CF2D",
+        "calendar_empty": "#202119",
+        "header_text": "#11120F",
+        "selected_text": "#11120F",
+        "blue_button_text": "#11120F",
+        "button_disabled_text": "#4A4A25",
+        "in_center": "#6FA8FF",
+        "distressed": True,
+        "dark_titlebar": True,
+    },
 
 }
 
@@ -203,7 +280,8 @@ def set_theme_palette(theme_name):
     global CYAN, TEXT, MUTED, GREEN, YELLOW, RED, BORDER
     global INPUT_BG, BUTTON_BG, BUTTON_HOVER
     global PANEL_TITLE_BG, STATUS_BG, CHART_BG, SELECT_BG, CALENDAR_EMPTY
-    global HEADER_TEXT, SELECTED_TEXT, BLUE_BUTTON_TEXT
+    global HEADER_TEXT, SELECTED_TEXT, BLUE_BUTTON_TEXT, BUTTON_DISABLED_TEXT
+    global IN_CENTER_COLOR
 
     theme = THEMES.get(theme_name, THEMES["Medical Blue"])
     BLUE_BG = theme["bg"]
@@ -228,6 +306,8 @@ def set_theme_palette(theme_name):
     HEADER_TEXT = theme.get("header_text", TEXT)
     SELECTED_TEXT = theme.get("selected_text", "#FFFFFF")
     BLUE_BUTTON_TEXT = theme.get("blue_button_text", TEXT)
+    BUTTON_DISABLED_TEXT = theme.get("button_disabled_text", MUTED)
+    IN_CENTER_COLOR = theme.get("in_center", CYAN)
     return theme
 
 set_theme_palette("Medical Blue")
@@ -455,6 +535,7 @@ class InventoryDB:
             full_attempt_usage INTEGER NOT NULL DEFAULT 0,
             allow_half_removal INTEGER NOT NULL DEFAULT 0,
             disallow_half_usage INTEGER NOT NULL DEFAULT 0,
+            inventory_type TEXT NOT NULL DEFAULT 'standard',
             baseline_received_cutoff_id INTEGER NOT NULL DEFAULT 0,
             baseline_correction_cutoff_id INTEGER NOT NULL DEFAULT 0,
             baseline_session_cutoff_id INTEGER NOT NULL DEFAULT 0,
@@ -475,12 +556,16 @@ class InventoryDB:
         CREATE TABLE IF NOT EXISTS session_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_date TEXT NOT NULL,
+            treatment_time TEXT NOT NULL DEFAULT '',
             session_type TEXT NOT NULL,
             session_equivalent REAL NOT NULL DEFAULT 1,
             notes TEXT,
             pak_lot TEXT NOT NULL DEFAULT '',
             sak_lot TEXT NOT NULL DEFAULT '',
+            sak_hours_remaining INTEGER NOT NULL DEFAULT 0,
             cartridge_lot TEXT NOT NULL DEFAULT '',
+            warmer_line_lot TEXT NOT NULL DEFAULT '',
+            hanging_bags_used INTEGER NOT NULL DEFAULT 0,
             cycler_serial TEXT NOT NULL DEFAULT '',
             pureflow_serial TEXT NOT NULL DEFAULT ''
         );
@@ -538,6 +623,11 @@ class InventoryDB:
                 "ALTER TABLE items ADD COLUMN "
                 "last_inventory_update_date TEXT NOT NULL DEFAULT ''"
             )
+        if "inventory_type" not in item_columns:
+            c.execute(
+                "ALTER TABLE items ADD COLUMN "
+                "inventory_type TEXT NOT NULL DEFAULT 'standard'"
+            )
 
         session_columns = {
             row["name"] for row in c.execute(
@@ -545,9 +635,13 @@ class InventoryDB:
             ).fetchall()
         }
         treatment_identity_columns = {
+            "treatment_time": "TEXT NOT NULL DEFAULT ''",
             "pak_lot": "TEXT NOT NULL DEFAULT ''",
             "sak_lot": "TEXT NOT NULL DEFAULT ''",
+            "sak_hours_remaining": "INTEGER NOT NULL DEFAULT 0",
             "cartridge_lot": "TEXT NOT NULL DEFAULT ''",
+            "warmer_line_lot": "TEXT NOT NULL DEFAULT ''",
+            "hanging_bags_used": "INTEGER NOT NULL DEFAULT 0",
             "cycler_serial": "TEXT NOT NULL DEFAULT ''",
             "pureflow_serial": "TEXT NOT NULL DEFAULT ''",
         }
@@ -568,6 +662,7 @@ class InventoryDB:
             "last_pak_lot": "",
             "last_sak_lot": "",
             "last_cartridge_lot": "",
+            "last_warmer_line_lot": "",
             "last_cycler_serial": "",
             "last_pureflow_serial": "",
             "inventory_reconciliation_v15": "0",
@@ -584,6 +679,35 @@ class InventoryDB:
                SET full_attempt_usage=1
                WHERE UPPER(TRIM(item_name))='SAK'"""
         )
+
+        # Assign stable roles to recognizable legacy items. The role remains
+        # attached if the user later renames the item. Only one active item is
+        # selected for each special role to keep treatment deductions clear.
+        for inventory_type, legacy_names in (
+            (INVENTORY_TYPE_SAK, ("SAK",)),
+            (INVENTORY_TYPE_HANGING_BAGS, (
+                "DIALYSATE HANGING BAGS (EMERGENCY BAGS)",
+                "HANGING BAGS",
+            )),
+            (INVENTORY_TYPE_WARMER_LINES, ("WARMER LINES", "WARMER LINE")),
+        ):
+            already_assigned = c.execute(
+                "SELECT 1 FROM items WHERE inventory_type=? AND active=1 LIMIT 1",
+                (inventory_type,),
+            ).fetchone()
+            if not already_assigned:
+                placeholders = ",".join("?" for _ in legacy_names)
+                match = c.execute(
+                    f"SELECT id FROM items WHERE active=1 "
+                    f"AND UPPER(TRIM(item_name)) IN ({placeholders}) "
+                    "ORDER BY id LIMIT 1",
+                    legacy_names,
+                ).fetchone()
+                if match:
+                    c.execute(
+                        "UPDATE items SET inventory_type=? WHERE id=?",
+                        (inventory_type, match["id"]),
+                    )
         self.conn.commit()
 
     def get_setting(self, key, default=""):
@@ -603,31 +727,62 @@ class InventoryDB:
     def item_by_id(self, item_id):
         return self.conn.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
 
+    def item_by_inventory_type(self, inventory_type):
+        return self.conn.execute(
+            "SELECT * FROM items WHERE inventory_type=? AND active=1 ORDER BY id LIMIT 1",
+            (inventory_type,),
+        ).fetchone()
+
+    def validate_inventory_type_assignment(
+        self,
+        inventory_type,
+        exclude_item_id=None,
+    ):
+        if inventory_type not in INVENTORY_TYPE_LABELS:
+            raise ValueError("Invalid inventory type.")
+        if inventory_type == INVENTORY_TYPE_STANDARD:
+            return
+        row = self.conn.execute(
+            """SELECT item_name FROM items
+               WHERE inventory_type=? AND active=1 AND id<>?
+               ORDER BY id LIMIT 1""",
+            (inventory_type, int(exclude_item_id or 0)),
+        ).fetchone()
+        if row:
+            raise ValueError(
+                f"'{row['item_name']}' is already classified as "
+                f"{INVENTORY_TYPE_LABELS[inventory_type]}. Edit that item "
+                "first; only one active item can use this inventory type."
+            )
+
     def add_item(self, group_name, item_name, baseline_units=0, baseline_date=None,
                  min_threshold=0, low_threshold=0, units_per_session=0,
                  units_per_week=0, reusable_sessions=1, lifespan_days=0,
                  auto_session_usage=1, full_attempt_usage=0,
-                 allow_half_removal=0, disallow_half_usage=0):
+                 allow_half_removal=0, disallow_half_usage=0,
+                 inventory_type=INVENTORY_TYPE_STANDARD):
         item_name = item_name.strip()
         if not item_name:
             raise ValueError("Item name cannot be blank.")
         if group_name not in (GROUP_NX, GROUP_DV):
             raise ValueError("Invalid inventory group.")
+        self.validate_inventory_type_assignment(inventory_type)
         baseline_date = baseline_date or iso_today()
         self.conn.execute("""
             INSERT INTO items(
                 group_name,item_name,baseline_units,baseline_date,min_threshold,low_threshold,
                 units_per_session,units_per_week,reusable_sessions,lifespan_days,
                 auto_session_usage,full_attempt_usage,allow_half_removal,
-                disallow_half_usage,last_inventory_update_date,active
+                disallow_half_usage,inventory_type,last_inventory_update_date,active
             )
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)
         """, (
             group_name, item_name, float(baseline_units), baseline_date,
             float(min_threshold), float(low_threshold), float(units_per_session),
             float(units_per_week), max(float(reusable_sessions), 1.0),
             int(lifespan_days), int(auto_session_usage), int(full_attempt_usage),
-            int(allow_half_removal), int(disallow_half_usage), baseline_date
+            int(allow_half_removal), int(disallow_half_usage), inventory_type,
+            baseline_date
         ))
         self.conn.commit()
 
@@ -637,8 +792,14 @@ class InventoryDB:
             "low_threshold", "units_per_session", "units_per_week", "reusable_sessions",
             "lifespan_days", "auto_session_usage", "full_attempt_usage",
             "allow_half_removal", "disallow_half_usage",
+            "inventory_type",
             "last_inventory_update_date", "active"
         }
+        if "inventory_type" in kwargs:
+            self.validate_inventory_type_assignment(
+                kwargs["inventory_type"],
+                exclude_item_id=item_id,
+            )
         parts, values = [], []
         for k, v in kwargs.items():
             if k in allowed:
@@ -894,15 +1055,66 @@ class InventoryDB:
         return before, current_after
 
 
+    def active_sak_at(self, when):
+        """Return the unexpired half-SAK available immediately before `when`."""
+        rows = self.conn.execute(
+            """SELECT * FROM session_log
+               WHERE treatment_time<>''
+               ORDER BY session_date,treatment_time,id"""
+        ).fetchall()
+        active = None
+        for session in rows:
+            occurred_at = treatment_datetime(session)
+            if occurred_at is None or occurred_at >= when:
+                break
+            if active and occurred_at >= active["expires_at"]:
+                active = None
+            is_sak_treatment = (
+                str(session["session_type"]).strip() == "Regular Treatment"
+                and str(session["sak_lot"] or "").strip()
+                and int(session["hanging_bags_used"] or 0) == 0
+            )
+            if not is_sak_treatment:
+                uses_alternative = (
+                    str(session["session_type"]).strip() == "Regular Treatment"
+                    and not str(session["sak_lot"] or "").strip()
+                    and (
+                        int(session["hanging_bags_used"] or 0) > 0
+                        or str(session["warmer_line_lot"] or "").strip()
+                    )
+                )
+                if active and uses_alternative:
+                    active = None
+                continue
+            if active and active["lot"].casefold() == str(
+                session["sak_lot"]
+            ).strip().casefold():
+                active = None
+                continue
+            hours = int(session["sak_hours_remaining"] or 0)
+            if hours > 0:
+                active = {
+                    "lot": str(session["sak_lot"]).strip(),
+                    "expires_at": occurred_at + timedelta(hours=hours),
+                }
+        if active and when >= active["expires_at"]:
+            return None
+        return active
+
+
     def add_session(
         self,
         session_date,
         session_type,
         session_equivalent,
         notes="",
+        treatment_time="",
         pak_lot="",
         sak_lot="",
+        sak_hours_remaining=80,
         cartridge_lot="",
+        warmer_line_lot="",
+        hanging_bags_used=0,
         cycler_serial="",
         pureflow_serial="",
     ):
@@ -910,10 +1122,17 @@ class InventoryDB:
             # Keep imports and future clients (including macOS) inventory-safe.
             session_equivalent = 0
 
+        treatment_time = (
+            validate_treatment_time(treatment_time)
+            if str(treatment_time or "").strip()
+            else ""
+        )
+
         values = {
             "pak_lot": str(pak_lot).strip(),
             "sak_lot": str(sak_lot).strip(),
             "cartridge_lot": str(cartridge_lot).strip(),
+            "warmer_line_lot": str(warmer_line_lot).strip(),
             "cycler_serial": str(cycler_serial).strip(),
             "pureflow_serial": str(pureflow_serial).strip(),
         }
@@ -921,26 +1140,81 @@ class InventoryDB:
             ("PAK lot number", values["pak_lot"]),
             ("SAK lot number", values["sak_lot"]),
             ("Cartridge lot number", values["cartridge_lot"]),
+            ("Warmer line lot number", values["warmer_line_lot"]),
             ("Cycler serial number", values["cycler_serial"]),
             ("PureFlow serial number", values["pureflow_serial"]),
         ]:
             if len(value) > 80:
                 raise ValueError(f"{label} must be 80 characters or fewer.")
 
+        hanging_bags_used = validate_hanging_bags_used(hanging_bags_used)
+        if str(session_type).strip() != "Regular Treatment":
+            hanging_bags_used = 0
+        else:
+            if hanging_bags_used > 0 and values["sak_lot"]:
+                raise ValueError(
+                    "Hanging bags replace the SAK. A Complete Treatment "
+                    "cannot contain both a SAK lot and hanging bags."
+                )
+            if hanging_bags_used > 0 and not values["warmer_line_lot"]:
+                raise ValueError(
+                    "A Warmer Line lot number is required whenever hanging "
+                    "bags are used."
+                )
+            for value, inventory_type, label in (
+                (values["sak_lot"], INVENTORY_TYPE_SAK, "SAK"),
+                (
+                    values["warmer_line_lot"],
+                    INVENTORY_TYPE_WARMER_LINES,
+                    "Warmer lines",
+                ),
+                (
+                    hanging_bags_used,
+                    INVENTORY_TYPE_HANGING_BAGS,
+                    "Hanging bags",
+                ),
+            ):
+                if value and not self.item_by_inventory_type(inventory_type):
+                    raise ValueError(
+                        f"No active inventory item is classified as {label}."
+                    )
+
+            stored_sak_hours = 0
+            if values["sak_lot"] and treatment_time:
+                used_at = datetime.strptime(
+                    f"{session_date} {treatment_time}",
+                    "%Y-%m-%d %H:%M",
+                )
+                active = self.active_sak_at(used_at)
+                continuing_same_sak = (
+                    active
+                    and active["lot"].casefold() == values["sak_lot"].casefold()
+                )
+                if not continuing_same_sak:
+                    stored_sak_hours = validate_sak_hours_remaining(
+                        sak_hours_remaining
+                    )
+
         cursor = self.conn.execute(
             """INSERT INTO session_log(
-                   session_date, session_type, session_equivalent, notes,
-                   pak_lot, sak_lot, cartridge_lot,
+                   session_date, treatment_time, session_type,
+                   session_equivalent, notes,
+                   pak_lot, sak_lot, sak_hours_remaining, cartridge_lot,
+                   warmer_line_lot, hanging_bags_used,
                    cycler_serial, pureflow_serial
-               ) VALUES(?,?,?,?,?,?,?,?,?)""",
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 session_date,
+                treatment_time,
                 session_type,
                 session_equivalent,
                 notes,
                 values["pak_lot"],
                 values["sak_lot"],
+                stored_sak_hours if str(session_type).strip() == "Regular Treatment" else 0,
                 values["cartridge_lot"],
+                values["warmer_line_lot"],
+                hanging_bags_used,
                 values["cycler_serial"],
                 values["pureflow_serial"],
             ),
@@ -951,6 +1225,7 @@ class InventoryDB:
                 ("last_pak_lot", values["pak_lot"]),
                 ("last_sak_lot", values["sak_lot"]),
                 ("last_cartridge_lot", values["cartridge_lot"]),
+                ("last_warmer_line_lot", values["warmer_line_lot"]),
                 ("last_cycler_serial", values["cycler_serial"]),
                 ("last_pureflow_serial", values["pureflow_serial"]),
             ]
@@ -1014,6 +1289,24 @@ class InventoryDB:
 
             return 0.0
 
+        if (
+            item["inventory_type"] == INVENTORY_TYPE_HANGING_BAGS
+            and str(session["session_type"]).strip() == "Regular Treatment"
+        ):
+            return float(session["hanging_bags_used"] or 0)
+
+        if str(session["session_type"]).strip() == "Regular Treatment":
+            if item["inventory_type"] == INVENTORY_TYPE_WARMER_LINES:
+                return 1.0 if str(session["warmer_line_lot"] or "").strip() else 0.0
+            if item["inventory_type"] == INVENTORY_TYPE_SAK:
+                if str(session["treatment_time"] or "").strip():
+                    if (
+                        not str(session["sak_lot"] or "").strip()
+                        or int(session["hanging_bags_used"] or 0) > 0
+                    ):
+                        return 0.0
+                    return 0.5
+
         if int(item["auto_session_usage"] or 0) != 1:
             return 0.0
 
@@ -1037,7 +1330,12 @@ class InventoryDB:
         end_clause = ""
         if through_date is not None:
             end_clause = " AND s.session_date<=?"
-            params.append(through_date)
+            through_day = (
+                through_date.date()
+                if isinstance(through_date, datetime)
+                else through_date
+            )
+            params.append(parse_date(through_day).isoformat())
 
         sessions = self.conn.execute(
             f"""SELECT s.* FROM session_log s
@@ -1046,13 +1344,96 @@ class InventoryDB:
                     OR (s.session_date=? AND s.id>?)
                 )
                 {end_clause}
-                ORDER BY s.session_date,s.id""",
+                ORDER BY s.session_date,s.treatment_time,s.id""",
             tuple(params),
         ).fetchall()
+
+        if item["inventory_type"] == INVENTORY_TYPE_SAK:
+            return self.sak_lifecycle_usage(item, sessions, through_date)
 
         total = 0.0
         for session in sessions:
             total += self.item_usage_for_session(item, session)
+        return total
+
+    def sak_lifecycle_usage(self, item, sessions, through_date=None):
+        """Return SAK use plus any remainder discarded after 80 hours."""
+        total = 0.0
+        remaining = 0.0
+        expires_at = None
+        active_lot = ""
+
+        for session in sessions:
+            occurred_at = treatment_datetime(session)
+            if occurred_at is None:
+                # Legacy records have no time and retain their old calculation.
+                total += self.item_usage_for_session(item, session)
+                continue
+
+            if (
+                remaining > 0
+                and occurred_at >= expires_at
+            ):
+                total += remaining
+                remaining = 0.0
+                expires_at = None
+                active_lot = ""
+
+            is_sak_treatment = (
+                str(session["session_type"]).strip() == "Regular Treatment"
+                and str(session["sak_lot"] or "").strip()
+                and int(session["hanging_bags_used"] or 0) == 0
+            )
+            if not is_sak_treatment:
+                uses_alternative = (
+                    str(session["session_type"]).strip() == "Regular Treatment"
+                    and not str(session["sak_lot"] or "").strip()
+                    and (
+                        int(session["hanging_bags_used"] or 0) > 0
+                        or str(session["warmer_line_lot"] or "").strip()
+                    )
+                )
+                if remaining > 0 and uses_alternative:
+                    total += remaining
+                    remaining = 0.0
+                    expires_at = None
+                    active_lot = ""
+                continue
+
+            lot = str(session["sak_lot"]).strip()
+            if remaining > 0 and lot.casefold() != active_lot.casefold():
+                total += remaining
+                remaining = 0.0
+
+            if remaining <= 0:
+                hours = int(session["sak_hours_remaining"] or 0)
+                if hours <= 0:
+                    # The first half may already be incorporated into a later
+                    # inventory baseline; this row closes that prior SAK.
+                    total += 0.5
+                    continue
+                remaining = 1.0
+                expires_at = occurred_at + timedelta(hours=hours)
+                active_lot = lot
+
+            used_now = min(0.5, remaining)
+            total += used_now
+            remaining -= used_now
+            if remaining <= 1e-9:
+                remaining = 0.0
+                expires_at = None
+                active_lot = ""
+
+        if through_date is None:
+            as_of = datetime.now()
+        elif isinstance(through_date, datetime):
+            as_of = through_date
+        else:
+            as_of = datetime.combine(parse_date(through_date), datetime.max.time())
+
+        if remaining > 0 and as_of >= expires_at:
+            total += remaining
+
         return total
 
 
@@ -1576,8 +1957,9 @@ class InventoryDB:
                WHERE pak_lot LIKE ? COLLATE NOCASE
                   OR sak_lot LIKE ? COLLATE NOCASE
                   OR cartridge_lot LIKE ? COLLATE NOCASE
+                  OR warmer_line_lot LIKE ? COLLATE NOCASE
                ORDER BY session_date DESC, id DESC""",
-            (pattern, pattern, pattern),
+            (pattern, pattern, pattern, pattern),
         ).fetchall()
 
     def recent_received(self, limit=30):
@@ -1709,7 +2091,7 @@ class ColorButton(tk.Label):
         self.normal_fg = fg
         self.active_bg = activebackground
         self.active_fg = activeforeground
-        kwargs.setdefault("disabledforeground", MUTED)
+        kwargs.setdefault("disabledforeground", BUTTON_DISABLED_TEXT)
         kwargs.setdefault("takefocus", True)
         super().__init__(master, text=text, bg=bg, fg=fg, **kwargs)
         self.bind("<Enter>", self._enter)
@@ -1879,6 +2261,9 @@ class HHDApp(tk.Tk):
         )
         provider_var = tk.StringVar()
         item_name_var = tk.StringVar()
+        inventory_type_var = tk.StringVar(
+            value=INVENTORY_TYPE_LABELS[INVENTORY_TYPE_STANDARD]
+        )
         units_var = tk.StringVar(value="0")
         added_items = []
 
@@ -2192,8 +2577,18 @@ class HHDApp(tk.Tk):
                 bd=1,
             )
             item_entry.grid(row=1, column=1, sticky="ew", pady=7)
-            tk.Label(form, text="Current units", bg=BLUE_PANEL, fg=TEXT).grid(
+            tk.Label(form, text="Inventory type", bg=BLUE_PANEL, fg=TEXT).grid(
                 row=2, column=0, sticky="w", padx=(0, 12), pady=7
+            )
+            ttk.Combobox(
+                form,
+                textvariable=inventory_type_var,
+                values=list(INVENTORY_TYPE_LABELS.values()),
+                state="readonly",
+                width=34,
+            ).grid(row=2, column=1, sticky="ew", pady=7)
+            tk.Label(form, text="Current units", bg=BLUE_PANEL, fg=TEXT).grid(
+                row=3, column=0, sticky="w", padx=(0, 12), pady=7
             )
             tk.Entry(
                 form,
@@ -2203,7 +2598,7 @@ class HHDApp(tk.Tk):
                 insertbackground=TEXT,
                 relief="solid",
                 bd=1,
-            ).grid(row=2, column=1, sticky="ew", pady=7)
+            ).grid(row=3, column=1, sticky="ew", pady=7)
             form.columnconfigure(1, weight=1)
 
             added_var = tk.StringVar()
@@ -2248,10 +2643,17 @@ class HHDApp(tk.Tk):
                         baseline_units=units,
                         baseline_date=iso_today(),
                         auto_session_usage=0,
+                        inventory_type=next(
+                            key for key, label in INVENTORY_TYPE_LABELS.items()
+                            if label == inventory_type_var.get()
+                        ),
                     )
                     added_items.append((provider_var.get(), name, units))
                     item_name_var.set("")
                     units_var.set("0")
+                    inventory_type_var.set(
+                        INVENTORY_TYPE_LABELS[INVENTORY_TYPE_STANDARD]
+                    )
                     refresh_added_items()
                     item_entry.focus_set()
                 except sqlite3.IntegrityError:
@@ -3105,31 +3507,37 @@ class HHDApp(tk.Tk):
             font=("Segoe UI", 9, "bold"),
         ).pack(side="left")
 
-        tk.Button(
+        ColorButton(
             controls,
             text="−",
             command=lambda: self.adjust_inventory_font(-1),
             bg=BUTTON_BG,
-            fg=TEXT,
+            fg=BLUE_BUTTON_TEXT,
             activebackground=BUTTON_HOVER,
-            activeforeground=TEXT,
-            relief="flat",
-            width=3,
-            font=("Segoe UI", 11, "bold"),
+            activeforeground=BLUE_BUTTON_TEXT,
+            relief="raised",
+            bd=1,
+            width=2,
+            padx=6,
+            pady=3,
+            font=("Segoe UI", 12, "bold"),
             cursor="hand2",
         ).pack(side="left", padx=(8, 3))
 
-        tk.Button(
+        ColorButton(
             controls,
             text="+",
             command=lambda: self.adjust_inventory_font(1),
             bg=BUTTON_BG,
-            fg=TEXT,
+            fg=BLUE_BUTTON_TEXT,
             activebackground=BUTTON_HOVER,
-            activeforeground=TEXT,
-            relief="flat",
-            width=3,
-            font=("Segoe UI", 11, "bold"),
+            activeforeground=BLUE_BUTTON_TEXT,
+            relief="raised",
+            bd=1,
+            width=2,
+            padx=6,
+            pady=3,
+            font=("Segoe UI", 12, "bold"),
             cursor="hand2",
         ).pack(side="left", padx=3)
 
@@ -3158,9 +3566,9 @@ class HHDApp(tk.Tk):
             text=text,
             command=command,
             bg=BUTTON_BG,
-            fg=TEXT,
+            fg=BLUE_BUTTON_TEXT,
             activebackground=BUTTON_HOVER,
-            activeforeground=TEXT,
+            activeforeground=BLUE_BUTTON_TEXT,
             relief="flat",
             padx=14,
             pady=7,
@@ -3169,16 +3577,89 @@ class HHDApp(tk.Tk):
         )
 
     def build_windows_menu(self):
-        menubar = tk.Menu(self)
+        menubar = tk.Menu(self, tearoff=0)
 
-        menubar.add_command(
-            label="Settings / Items",
+        if sys.platform == "darwin":
+            # Aqua Tk enables the native HHD Inventory Manager > Settings…
+            # item (and Command-,) only when this well-known callback exists.
+            self.createcommand(
+                "::tk::mac::ShowPreferences",
+                self.show_settings,
+            )
+            app_menu = tk.Menu(menubar, name="apple", tearoff=0)
+            app_menu.add_command(
+                label=f"About {APP_NAME}",
+                command=self.show_about,
+            )
+            menubar.add_cascade(menu=app_menu)
+
+        file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(
+            label="Import Database…",
+            command=self.import_database_action,
+        )
+        file_menu.add_command(
+            label="Export Database…",
+            command=self.export_database_action,
+        )
+        file_menu.add_command(
+            label="Export Inventory CSV…",
+            command=self.export_csv,
+        )
+        if sys.platform != "darwin":
+            file_menu.add_separator()
+            file_menu.add_command(label="Exit", command=self.on_close)
+        menubar.add_cascade(label="File", menu=file_menu)
+
+        treatment_menu = tk.Menu(menubar, tearoff=0)
+        treatment_menu.add_command(
+            label="Record Treatment",
+            command=self.show_log_session,
+        )
+        treatment_menu.add_command(
+            label="Calendar",
+            command=self.show_treatment_calendar,
+        )
+        treatment_menu.add_command(
+            label="Treatment History",
+            command=self.show_treatment_history,
+        )
+        treatment_menu.add_command(
+            label="Lot Number Search",
+            command=self.show_lot_number_search,
+        )
+        menubar.add_cascade(label="Treatment", menu=treatment_menu)
+
+        inventory_menu = tk.Menu(menubar, tearoff=0)
+        inventory_menu.add_command(
+            label=self.group_display_name(GROUP_NX),
+            command=lambda: self.show_inventory(GROUP_NX),
+        )
+        inventory_menu.add_command(
+            label=self.group_display_name(GROUP_DV),
+            command=lambda: self.show_inventory(GROUP_DV),
+        )
+        inventory_menu.add_separator()
+        inventory_menu.add_command(
+            label="Received Inventory",
+            command=self.show_received,
+        )
+        inventory_menu.add_command(
+            label="Inventory History",
+            command=self.show_inventory_history,
+        )
+        inventory_menu.add_command(
+            label="Settings / Items…",
             command=self.show_settings,
         )
-        menubar.add_command(
-            label="About",
+        menubar.add_cascade(label="Inventory", menu=inventory_menu)
+
+        help_menu = tk.Menu(menubar, name="help", tearoff=0)
+        help_menu.add_command(
+            label=f"About {APP_NAME}",
             command=self.show_about,
         )
+        menubar.add_cascade(label="Help", menu=help_menu)
 
         self.configure(menu=menubar)
 
@@ -3219,6 +3700,7 @@ class HHDApp(tk.Tk):
             fg=CYAN,
             font=("Segoe UI", 13, "bold"),
         ).pack(anchor="w", padx=18, pady=(18, 8))
+        self.add_theme_distress(menu, height=8, padx=14, pady=(0, 7))
 
         buttons = [
             ("⌂  Dashboard", self.show_dashboard),
@@ -3274,9 +3756,64 @@ class HHDApp(tk.Tk):
         for w in self.content.winfo_children():
             w.destroy()
 
+    def add_theme_distress(self, parent, height=6, padx=0, pady=0):
+        """Add a restrained, deterministic worn-paint band for C77 surfaces."""
+        if not self.theme_palette.get("distressed"):
+            return None
+
+        strip = tk.Canvas(
+            parent,
+            height=height,
+            bg=CYAN,
+            bd=0,
+            highlightthickness=0,
+        )
+
+        def redraw(event=None):
+            width = max(1, event.width if event is not None else strip.winfo_width())
+            strip.delete("distress")
+            marks = (
+                (0.04, 0.17, 1, 3),
+                (0.11, 0.07, 4, 2),
+                (0.23, 0.12, 0, 2),
+                (0.37, 0.05, 3, 3),
+                (0.49, 0.18, 2, 2),
+                (0.64, 0.09, 4, 2),
+                (0.76, 0.14, 1, 3),
+                (0.91, 0.06, 3, 2),
+            )
+            for start, length, y, thickness in marks:
+                x1 = int(width * start)
+                x2 = min(width, x1 + max(4, int(width * length)))
+                strip.create_rectangle(
+                    x1,
+                    y,
+                    x2,
+                    min(height, y + thickness),
+                    fill="#5B5A24",
+                    outline="",
+                    tags="distress",
+                )
+            for fraction in (0.18, 0.44, 0.69, 0.84):
+                x = int(width * fraction)
+                strip.create_line(
+                    x,
+                    0,
+                    x + 8,
+                    height,
+                    fill="#24251D",
+                    width=1,
+                    tags="distress",
+                )
+
+        strip.bind("<Configure>", redraw)
+        strip.pack(fill="x", padx=padx, pady=pady)
+        return strip
+
     def make_panel(self, parent, title):
         panel = tk.Frame(parent, bg=BLUE_PANEL, highlightbackground=BORDER, highlightthickness=1)
         tk.Label(panel, text=title, bg=PANEL_TITLE_BG, fg=CYAN, font=("Segoe UI", 12, "bold"), anchor="w", padx=12, pady=8).pack(fill="x")
+        self.add_theme_distress(panel)
         body = tk.Frame(panel, bg=BLUE_PANEL)
         body.pack(fill="both", expand=True, padx=12, pady=12)
         return panel, body
@@ -3489,9 +4026,20 @@ class HHDApp(tk.Tk):
 
         group_var = tk.StringVar(value=self.group_display_name(default_group if is_new else item["group_name"]))
         name_var = tk.StringVar(value="" if is_new else item["item_name"])
+        inventory_type_var = tk.StringVar(
+            value=INVENTORY_TYPE_LABELS[
+                INVENTORY_TYPE_STANDARD if is_new else item["inventory_type"]
+            ]
+        )
         rows = [
             ("group_name", "Inventory Group", group_var, "combo"),
             ("item_name", "Item Name", name_var, "entry"),
+            (
+                "inventory_type",
+                "Inventory Type",
+                inventory_type_var,
+                "inventory_type_combo",
+            ),
             ("baseline_units", "Current/Baseline Units", tk.StringVar(value=val("baseline_units", 0)), "entry"),
             ("baseline_date", "Baseline Snapshot Date YYYY-MM-DD", tk.StringVar(value=val("baseline_date", iso_today())), "entry"),
             ("last_inventory_update_date", "Last Inventory Update", tk.StringVar(value=val("last_inventory_update_date", iso_today())), "readonly"),
@@ -3508,6 +4056,14 @@ class HHDApp(tk.Tk):
             tk.Label(form, text=label, bg=BLUE_PANEL, fg=TEXT, font=("Segoe UI", 10)).grid(row=idx, column=0, sticky="w", padx=14, pady=7)
             if typ == "combo":
                 e = ttk.Combobox(form, textvariable=var, values=[self.group_display_name(GROUP_NX), self.group_display_name(GROUP_DV)], width=34, state="readonly")
+            elif typ == "inventory_type_combo":
+                e = ttk.Combobox(
+                    form,
+                    textvariable=var,
+                    values=list(INVENTORY_TYPE_LABELS.values()),
+                    width=34,
+                    state="readonly",
+                )
             else:
                 e = tk.Entry(form, textvariable=var, bg=INPUT_BG, fg=TEXT, insertbackground=TEXT, relief="solid", bd=1, font=("Segoe UI", 10), width=38)
                 if typ == "readonly":
@@ -3638,6 +4194,10 @@ class HHDApp(tk.Tk):
                     "auto_session_usage": int(auto_var.get()),
                     "full_attempt_usage": int(full_attempt_var.get()),
                     "disallow_half_usage": int(no_half_var.get()),
+                    "inventory_type": next(
+                        key for key, label in INVENTORY_TYPE_LABELS.items()
+                        if label == inventory_type_var.get()
+                    ),
                 }
                 if not item_name:
                     raise ValueError("Item name cannot be blank.")
@@ -3792,7 +4352,7 @@ class HHDApp(tk.Tk):
             "complete": GREEN,
             "incomplete": YELLOW,
             "missed": RED,
-            "in_center": CYAN,
+            "in_center": IN_CENTER_COLOR,
         }
 
         for treatment in treatments:
@@ -3823,6 +4383,11 @@ class HHDApp(tk.Tk):
             record = treatment.get("record", {})
             identity_lines = [
                 (
+                    f"Treatment time: {record.get('treatment_time', '')}"
+                    if record.get("treatment_time")
+                    else ""
+                ),
+                (
                     f"PAK lot#: {record.get('pak_lot', '')}"
                     if record.get("pak_lot")
                     else ""
@@ -3833,8 +4398,24 @@ class HHDApp(tk.Tk):
                     else ""
                 ),
                 (
+                    "SAK hours left after first use: "
+                    f"{record.get('sak_hours_remaining', 0)}"
+                    if int(record.get("sak_hours_remaining", 0) or 0) > 0
+                    else ""
+                ),
+                (
                     f"Cartridge lot#: {record.get('cartridge_lot', '')}"
                     if record.get("cartridge_lot")
+                    else ""
+                ),
+                (
+                    f"Warmer Line lot#: {record.get('warmer_line_lot', '')}"
+                    if record.get("warmer_line_lot")
+                    else ""
+                ),
+                (
+                    f"Hanging bags used: {record.get('hanging_bags_used', 0)}"
+                    if int(record.get("hanging_bags_used", 0) or 0) > 0
                     else ""
                 ),
                 (
@@ -4053,7 +4634,7 @@ class HHDApp(tk.Tk):
 
         search_panel, search_body = self.make_panel(
             self.content,
-            "Search PAK, SAK, or Cartridge Lot Numbers",
+            "Search PAK, SAK, Cartridge, or Warmer Line Lot Numbers",
         )
         search_panel.pack(fill="x", padx=16, pady=(0, 12))
 
@@ -4083,7 +4664,8 @@ class HHDApp(tk.Tk):
         results_panel.pack(fill="both", expand=True, padx=16, pady=(0, 16))
 
         columns = (
-            "date", "type", "pak", "sak", "cartridge", "notes"
+            "date", "time", "type", "pak", "sak", "sak_hours",
+            "cartridge", "warmer", "notes"
         )
         tree = ttk.Treeview(
             results_body,
@@ -4093,10 +4675,13 @@ class HHDApp(tk.Tk):
         )
         specs = [
             ("date", "Treatment Date", 120, False),
+            ("time", "Time", 75, False),
             ("type", "Treatment Type", 150, False),
             ("pak", "PAK lot#", 140, False),
             ("sak", "SAK lot#", 140, False),
+            ("sak_hours", "SAK Hours Left", 115, False),
             ("cartridge", "Cartridge lot#", 150, False),
+            ("warmer", "Warmer Line lot#", 150, False),
             ("notes", "Notes", 320, True),
         ]
         for col, title, width, stretch in specs:
@@ -4128,10 +4713,13 @@ class HHDApp(tk.Tk):
                     "end",
                     values=(
                         row["session_date"],
+                        row["treatment_time"],
                         normalized_type(row["session_type"]),
                         row["pak_lot"],
                         row["sak_lot"],
+                        row["sak_hours_remaining"],
                         row["cartridge_lot"],
+                        row["warmer_line_lot"],
                         row["notes"] or "",
                     ),
                 )
@@ -4158,15 +4746,20 @@ class HHDApp(tk.Tk):
                 with open(filename, "w", newline="", encoding="utf-8-sig") as handle:
                     writer = csv.writer(handle)
                     writer.writerow([
-                        "Treatment Date", "Treatment Type", "PAK lot#",
-                        "SAK lot#", "Cartridge lot#", "Notes",
+                        "Treatment Date", "Treatment Time", "Treatment Type",
+                        "PAK lot#", "SAK lot#", "SAK Hours Left",
+                        "Cartridge lot#", "Warmer Line lot#",
+                        "Hanging bags used", "Notes",
                     ])
                     for row in current_results:
                         writer.writerow([
                             row["session_date"],
+                            row["treatment_time"],
                             normalized_type(row["session_type"]),
                             row["pak_lot"], row["sak_lot"],
-                            row["cartridge_lot"], row["notes"] or "",
+                            row["sak_hours_remaining"],
+                            row["cartridge_lot"], row["warmer_line_lot"],
+                            row["hanging_bags_used"], row["notes"] or "",
                         ])
                 self.themed_export_complete(filename, "Lot Search Export")
             except Exception as ex:
@@ -4331,7 +4924,7 @@ class HHDApp(tk.Tk):
         tk.Label(controls,textvariable=title_var,bg=BLUE_PANEL,fg=TEXT,font=("Segoe UI",14,"bold")).pack(side="left",expand=True)
         legend=tk.Frame(self.content,bg=BLUE_BG); legend.pack(fill="x",padx=18,pady=(0,8))
         tk.Label(legend,text="Legend:",bg=BLUE_BG,fg=TEXT,font=("Segoe UI",10,"bold")).pack(side="left",padx=(0,10))
-        for label,color in [("Complete",GREEN),("Incomplete",YELLOW),("Missed",RED),("In Center",CYAN)]:
+        for label,color in [("Complete",GREEN),("Incomplete",YELLOW),("Missed",RED),("In Center",IN_CENTER_COLOR)]:
             tk.Label(legend,text=f"  {label}  ",bg=color,fg="#111111",font=("Segoe UI",10,"bold"),padx=8,pady=4).pack(side="left",padx=(0,10))
         calendar_panel,calendar_body=self.make_panel(self.content,"Calendar")
         calendar_panel.pack(fill="both",expand=True,padx=16,pady=(0,14))
@@ -4347,7 +4940,7 @@ class HHDApp(tk.Tk):
             fg=TEXT if current_month else MUTED
             tk.Label(cell,text=str(day_value.day),bg=CALENDAR_EMPTY,fg=fg,font=("Segoe UI",12,"bold"),anchor="nw").pack(fill="x",padx=6,pady=(5,2))
             bands=tk.Frame(cell,bg=CALENDAR_EMPTY); bands.pack(fill="both",expand=True,padx=3,pady=(0,3))
-            colors={"complete":GREEN,"incomplete":YELLOW,"missed":RED,"in_center":CYAN}
+            colors={"complete":GREEN,"incomplete":YELLOW,"missed":RED,"in_center":IN_CENTER_COLOR}
             names={"complete":"Complete","incomplete":"Incomplete","missed":"Missed","in_center":"In Center"}
             for tr in treatments:
                 band=tk.Frame(bands,bg=colors[tr["status"]])
@@ -4422,8 +5015,10 @@ class HHDApp(tk.Tk):
                 with open(filename, "w", newline="", encoding="utf-8-sig") as handle:
                     writer = csv.writer(handle)
                     writer.writerow([
-                        "Treatment Date", "Treatment Type", "PAK lot#",
-                        "SAK lot#", "Cartridge lot#", "Notes",
+                        "Treatment Date", "Treatment Time", "Treatment Type",
+                        "PAK lot#", "SAK lot#", "SAK Hours Left",
+                        "Cartridge lot#", "Warmer Line lot#",
+                        "Hanging bags used", "Notes",
                     ])
                     for record in rows:
                         treatment_type = {
@@ -4433,9 +5028,12 @@ class HHDApp(tk.Tk):
                             "complete": "Completed",
                         }[treatment_type_key(record["session_type"])]
                         writer.writerow([
-                            record["session_date"], treatment_type,
+                            record["session_date"], record["treatment_time"],
+                            treatment_type,
                             record["pak_lot"], record["sak_lot"],
-                            record["cartridge_lot"], record["notes"] or "",
+                            record["sak_hours_remaining"],
+                            record["cartridge_lot"], record["warmer_line_lot"],
+                            record["hanging_bags_used"], record["notes"] or "",
                         ])
                 self.themed_export_complete(filename, "Calendar Export")
             except Exception as ex:
@@ -5022,11 +5620,15 @@ class HHDApp(tk.Tk):
         panel.pack(fill="x", padx=16, pady=(0, 12))
 
         date_var = tk.StringVar(value=iso_today())
+        treatment_time_var = tk.StringVar(
+            value=datetime.now().strftime("%H:%M")
+        )
         type_var = tk.StringVar(value="Complete Treatment")
         equiv_var = tk.StringVar(value="1")
 
         basic_fields = [
             ("Treatment Date YYYY-MM-DD", date_var, "entry"),
+            ("Treatment Time HH:MM (24-hour)", treatment_time_var, "entry"),
             ("Treatment Type", type_var, "combo"),
             ("Treatment Equivalent", equiv_var, "entry"),
         ]
@@ -5086,7 +5688,7 @@ class HHDApp(tk.Tk):
             highlightthickness=1,
         )
         identity_frame.grid(
-            row=3,
+            row=4,
             column=0,
             columnspan=2,
             sticky="ew",
@@ -5111,8 +5713,12 @@ class HHDApp(tk.Tk):
             "sak_lot": tk.StringVar(
                 value=self.db.get_setting("last_sak_lot", "")
             ),
+            "sak_hours_remaining": tk.StringVar(value="80"),
             "cartridge_lot": tk.StringVar(
                 value=self.db.get_setting("last_cartridge_lot", "")
+            ),
+            "warmer_line_lot": tk.StringVar(
+                value=self.db.get_setting("last_warmer_line_lot", "")
             ),
             "cycler_serial": tk.StringVar(
                 value=self.db.get_setting("last_cycler_serial", "")
@@ -5127,7 +5733,9 @@ class HHDApp(tk.Tk):
             ("SAK lot#", "sak_lot", 1, 2),
             ("Cartridge lot#", "cartridge_lot", 2, 0),
             ("Cycler serial#", "cycler_serial", 2, 2),
-            ("PureFlow serial#", "pureflow_serial", 3, 0),
+            ("Warmer Line lot#", "warmer_line_lot", 3, 0),
+            ("PureFlow serial#", "pureflow_serial", 4, 0),
+            ("Hours left in SAK after first use", "sak_hours_remaining", 4, 2),
         ]
         identity_entries = []
         for label, key, row_index, column_index in identity_specs:
@@ -5163,6 +5771,32 @@ class HHDApp(tk.Tk):
             )
             identity_entries.append(entry)
 
+        warmer_line_entry = identity_entries[4]
+        sak_entry = identity_entries[1]
+        sak_hours_entry = identity_entries[6]
+        hanging_bags_var = tk.StringVar(value="0")
+        tk.Label(
+            identity_frame,
+            text="Hanging bags used",
+            bg=BLUE_PANEL,
+            fg=TEXT,
+            anchor="w",
+        ).grid(row=3, column=2, sticky="w", padx=(10, 6), pady=6)
+        hanging_bags_combo = ttk.Combobox(
+            identity_frame,
+            textvariable=hanging_bags_var,
+            values=[str(value) for value in range(11)],
+            state="readonly",
+            width=26,
+        )
+        hanging_bags_combo.grid(
+            row=3,
+            column=3,
+            sticky="ew",
+            padx=(0, 12),
+            pady=6,
+        )
+
         identity_frame.columnconfigure(1, weight=1)
         identity_frame.columnconfigure(3, weight=1)
 
@@ -5173,7 +5807,7 @@ class HHDApp(tk.Tk):
             highlightthickness=1,
         )
         custom_frame.grid(
-            row=4,
+            row=5,
             column=0,
             columnspan=2,
             sticky="ew",
@@ -5280,7 +5914,7 @@ class HHDApp(tk.Tk):
             bg=BLUE_PANEL,
             fg=TEXT,
             font=("Segoe UI", 10, "bold"),
-        ).grid(row=5, column=0, sticky="nw", padx=10, pady=7)
+        ).grid(row=6, column=0, sticky="nw", padx=10, pady=7)
 
         notes = tk.Text(
             body,
@@ -5295,7 +5929,7 @@ class HHDApp(tk.Tk):
             font=("Segoe UI", 10),
         )
         notes.grid(
-            row=5,
+            row=6,
             column=1,
             sticky="ew",
             padx=10,
@@ -5314,7 +5948,7 @@ class HHDApp(tk.Tk):
             fg=MUTED,
             font=("Segoe UI", 9),
         ).grid(
-            row=6,
+            row=7,
             column=0,
             columnspan=2,
             sticky="w",
@@ -5327,10 +5961,17 @@ class HHDApp(tk.Tk):
             incomplete = treatment_type == "Incomplete Treatment"
             missed = treatment_type == "Missed Treatment"
             in_center = treatment_type == "In Center Treatment"
+            complete = treatment_type == "Complete Treatment"
 
             equiv_var.set(
                 "0" if incomplete or missed or in_center else "1"
             )
+
+            if incomplete:
+                custom_frame.grid()
+            else:
+                custom_frame.grid_remove()
+            scroll_body.after_idle(update_treatment_scroll_region)
 
             item_combo.configure(
                 state="readonly" if incomplete else "disabled"
@@ -5349,8 +5990,56 @@ class HHDApp(tk.Tk):
                 entry.configure(
                     state="disabled" if missed or in_center else "normal"
                 )
+            warmer_line_entry.configure(
+                state="normal" if complete else "disabled"
+            )
+            hanging_bags_combo.configure(
+                state="readonly" if complete else "disabled"
+            )
+            using_hanging_bags = (
+                complete
+                and validate_hanging_bags_used(hanging_bags_var.get()) > 0
+            )
+            if using_hanging_bags:
+                if identity_vars["sak_lot"].get():
+                    identity_vars["sak_lot"].set("")
+                sak_entry.configure(state="disabled")
+            using_sak = (
+                complete
+                and bool(identity_vars["sak_lot"].get().strip())
+                and not using_hanging_bags
+            )
+            continuing_sak = False
+            if using_sak:
+                try:
+                    selected_at = datetime.strptime(
+                        f"{parse_date(date_var.get()).isoformat()} "
+                        f"{validate_treatment_time(treatment_time_var.get())}",
+                        "%Y-%m-%d %H:%M",
+                    )
+                    active_sak = self.db.active_sak_at(selected_at)
+                    continuing_sak = bool(
+                        active_sak
+                        and active_sak["lot"].casefold()
+                        == identity_vars["sak_lot"].get().strip().casefold()
+                    )
+                except ValueError:
+                    continuing_sak = False
+            if continuing_sak:
+                identity_vars["sak_hours_remaining"].set("0")
+                sak_hours_entry.configure(state="disabled")
+            elif using_sak:
+                if identity_vars["sak_hours_remaining"].get() == "0":
+                    identity_vars["sak_hours_remaining"].set("80")
+                sak_hours_entry.configure(state="normal")
+            else:
+                sak_hours_entry.configure(state="disabled")
 
         type_var.trace_add("write", adjust)
+        hanging_bags_var.trace_add("write", adjust)
+        identity_vars["sak_lot"].trace_add("write", adjust)
+        date_var.trace_add("write", adjust)
+        treatment_time_var.trace_add("write", adjust)
         adjust()
 
         def save_treatment():
@@ -5362,6 +6051,52 @@ class HHDApp(tk.Tk):
                     else session_type
                 )
                 equivalent = float(equiv_var.get())
+                hanging_bags_used = validate_hanging_bags_used(
+                    hanging_bags_var.get()
+                ) if session_type == "Complete Treatment" else 0
+
+                sak_lot = identity_vars["sak_lot"].get().strip()
+                warmer_line_lot = identity_vars[
+                    "warmer_line_lot"
+                ].get().strip()
+                if session_type == "Complete Treatment":
+                    if hanging_bags_used > 0 and sak_lot:
+                        raise ValueError(
+                            "Hanging bags replace the SAK. Enter either a SAK "
+                            "lot number or hanging bags used, not both."
+                        )
+                    if hanging_bags_used > 0 and not warmer_line_lot:
+                        raise ValueError(
+                            "Enter the Warmer Line lot number whenever "
+                            "hanging bags are used."
+                        )
+                    for value, inventory_type, label in (
+                        (sak_lot, INVENTORY_TYPE_SAK, "SAK"),
+                        (
+                            warmer_line_lot,
+                            INVENTORY_TYPE_WARMER_LINES,
+                            "Warmer lines",
+                        ),
+                    ):
+                        if value and not self.db.item_by_inventory_type(
+                            inventory_type
+                        ):
+                            raise ValueError(
+                                f"Before recording {label}, classify one "
+                                f"active inventory item as '{label}' in "
+                                "Item Settings."
+                            )
+
+                if (
+                    hanging_bags_used > 0
+                    and not self.db.item_by_inventory_type(
+                        INVENTORY_TYPE_HANGING_BAGS
+                    )
+                ):
+                    raise ValueError(
+                        "Before recording hanging bags, classify one active "
+                        "inventory item as 'Hanging bags' in Item Settings."
+                    )
 
                 if "Incomplete" in session_type and not pending:
                     raise ValueError(
@@ -5378,18 +6113,31 @@ class HHDApp(tk.Tk):
                     self.timestamp_note_entry(
                         notes.get("1.0", "end-1c")
                     ),
+                    treatment_time=validate_treatment_time(
+                        treatment_time_var.get()
+                    ),
                     pak_lot=(
                         identity_vars["pak_lot"].get()
                         if record_identity else ""
                     ),
                     sak_lot=(
-                        identity_vars["sak_lot"].get()
+                        sak_lot
                         if record_identity else ""
+                    ),
+                    sak_hours_remaining=(
+                        identity_vars["sak_hours_remaining"].get()
+                        if session_type == "Complete Treatment" and sak_lot
+                        else 80
                     ),
                     cartridge_lot=(
                         identity_vars["cartridge_lot"].get()
                         if record_identity else ""
                     ),
+                    warmer_line_lot=(
+                        warmer_line_lot
+                        if session_type == "Complete Treatment" else ""
+                    ),
+                    hanging_bags_used=hanging_bags_used,
                     cycler_serial=(
                         identity_vars["cycler_serial"].get()
                         if record_identity else ""
@@ -5425,7 +6173,7 @@ class HHDApp(tk.Tk):
             body,
             "Submit Treatment",
             save_treatment,
-        ).grid(row=7, column=1, sticky="w", padx=10, pady=12)
+        ).grid(row=8, column=1, sticky="w", padx=10, pady=12)
 
 
     def show_treatment_history(self):
@@ -5468,10 +6216,14 @@ class HHDApp(tk.Tk):
 
         columns = (
             "date",
+            "time",
             "type",
             "pak",
             "sak",
+            "sak_hours",
             "cartridge",
+            "warmer",
+            "bags",
             "cycler",
             "pureflow",
             "notes",
@@ -5485,10 +6237,14 @@ class HHDApp(tk.Tk):
 
         headings = [
             ("date", "Date", 105),
+            ("time", "Time", 75),
             ("type", "Treatment Type", 155),
             ("pak", "PAK Lot#", 125),
             ("sak", "SAK Lot#", 125),
+            ("sak_hours", "SAK Hours Left", 115),
             ("cartridge", "Cartridge Lot#", 140),
+            ("warmer", "Warmer Line Lot#", 145),
+            ("bags", "Hanging Bags", 110),
             ("cycler", "Cycler Serial#", 135),
             ("pureflow", "PureFlow Serial#", 145),
             ("notes", "Notes / Incomplete Item Usage", 360),
@@ -5546,12 +6302,16 @@ class HHDApp(tk.Tk):
                 iid=str(record["id"]),
                 values=(
                     record["session_date"],
+                    record["treatment_time"] or "",
                     self.display_treatment_type(
                         record["session_type"]
                     ),
                     record["pak_lot"] or "",
                     record["sak_lot"] or "",
+                    record["sak_hours_remaining"] or 0,
                     record["cartridge_lot"] or "",
+                    record["warmer_line_lot"] or "",
+                    record["hanging_bags_used"] or 0,
                     record["cycler_serial"] or "",
                     record["pureflow_serial"] or "",
                     notes_and_usage,

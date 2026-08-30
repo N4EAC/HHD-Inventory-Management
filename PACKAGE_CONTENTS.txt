@@ -1,4 +1,4 @@
-HHD Inventory Manager 1.5.6 Package
+HHD Inventory Manager 1.5.7 Package
 
 .gitignore
 HHD_Inventory_Manager_Setup.iss

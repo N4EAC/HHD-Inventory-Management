@@ -11,6 +11,31 @@ databases can be exported and imported between systems.
 
 <img width="1584" height="988" alt="image" src="https://github.com/user-attachments/assets/3e618332-5457-4214-80de-8d2de28d12d1" />
 
+## New in version 1.5.7
+
+- Complete treatments now record a **Warmer Line lot number** and the number
+  of **Hanging bags used** from 0 through 10.
+- Inventory items have a stable **Inventory Type** classification: Standard,
+  SAK, Hanging bags, or Warmer lines. Treatment deductions use this
+  classification instead of relying on an editable item name.
+- A SAK is deducted from a Complete Treatment only when a SAK lot number is
+  entered.
+- Complete Treatments record the treatment time. After the first treatment on
+  a SAK, the user enters the estimated hours remaining (1–80). HHDIM deducts
+  the remaining half when it is used by a second SAK treatment, when that time
+  expires, or when a later Complete Treatment switches to hanging bags and a
+  Warmer Line without a SAK.
+- Hanging bags replace the SAK for that treatment. HHDIM prevents entering a
+  SAK lot and hanging bags together, then deducts the selected number of bags.
+- A Warmer Line lot number is required whenever one or more hanging bags are
+  entered, preventing an incomplete alternative-treatment inventory record.
+- Entering a Warmer Line lot deducts one classified Warmer Line from inventory.
+- Existing databases are migrated safely. Recognizable SAK, Hanging Bags, and
+  Warmer Lines items are classified automatically and can be reviewed in Item
+  Settings.
+- Treatment history, calendar exports, and lot-number search now include the
+  new Warmer Line and Hanging Bags information.
+
 ## New in version 1.5.6
 
 - Brand-new users start with an empty inventory instead of preloaded items.
@@ -38,7 +63,7 @@ databases can be exported and imported between systems.
 - Record completed, incomplete, extra, missed, and in-center treatments.
 - In-center treatments are recorded without deducting any home inventory.
 - Automatically deduct configured supply usage from inventory.
-- Record PAK, SAK, and cartridge lot numbers.
+- Record PAK, SAK, cartridge, and Warmer Line lot numbers.
 - Record cycler and PureFlow serial numbers.
 - Add and edit treatment notes.
 - View treatments in a monthly calendar.
@@ -55,7 +80,8 @@ databases can be exported and imported between systems.
 - Import and export the application database.
 - Create and restore backups.
 - Remember application settings, window size, and position.
-- Select from multiple visual themes, including Medical Blue, Beige, Dark, Gray 95, Red Shadow, and Cyberpunk.
+- Select from multiple visual themes, including Medical Blue, Beige, Dark,
+  Gray 95, Red Shadow, Cyberpunk, and the distressed post-apocalyptic C77.
 
 ## Platform builds
 

@@ -1,7 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-set "APP_VERSION=1.5.6"
+set "APP_VERSION=1.5.7"
 
 echo Building HHD Inventory Manager v%APP_VERSION%
 echo.

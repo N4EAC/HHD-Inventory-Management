@@ -2,7 +2,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
-APP_VERSION="1.5.6"
+APP_VERSION="1.5.7"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 echo "Building HHD Inventory Manager v${APP_VERSION} for macOS"

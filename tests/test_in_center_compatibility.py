@@ -1,5 +1,6 @@
 import sqlite3
 import unittest
+from datetime import datetime
 
 import hhd_inventory_manager as app
 
@@ -92,6 +93,15 @@ class InCenterCompatibilityTests(unittest.TestCase):
             }
             self.assertIn("baseline_session_cutoff_id", item_columns)
             self.assertIn("full_attempt_usage", item_columns)
+            self.assertIn("inventory_type", item_columns)
+            session_columns = {
+                row["name"]
+                for row in database.conn.execute("PRAGMA table_info(session_log)")
+            }
+            self.assertIn("warmer_line_lot", session_columns)
+            self.assertIn("hanging_bags_used", session_columns)
+            self.assertIn("treatment_time", session_columns)
+            self.assertIn("sak_hours_remaining", session_columns)
         finally:
             database.conn.close()
 
@@ -121,6 +131,48 @@ class InCenterCompatibilityTests(unittest.TestCase):
         finally:
             database.conn.close()
 
+    def test_legacy_supply_names_receive_stable_inventory_types(self):
+        database = self.make_legacy_database()
+        try:
+            database.conn.executemany(
+                """INSERT INTO items(
+                       group_name, item_name, baseline_units, baseline_date
+                   ) VALUES(?,?,?,?)""",
+                [
+                    (app.GROUP_NX, "SAK", 3, "2026-01-01"),
+                    (
+                        app.GROUP_NX,
+                        "Dialysate Hanging Bags (Emergency Bags)",
+                        12,
+                        "2026-01-01",
+                    ),
+                    (app.GROUP_NX, "Warmer Lines", 4, "2026-01-01"),
+                ],
+            )
+            database.conn.commit()
+            database.init_db()
+
+            classifications = {
+                row["item_name"]: row["inventory_type"]
+                for row in database.items()
+            }
+            self.assertEqual(
+                app.INVENTORY_TYPE_SAK,
+                classifications["SAK"],
+            )
+            self.assertEqual(
+                app.INVENTORY_TYPE_HANGING_BAGS,
+                classifications[
+                    "Dialysate Hanging Bags (Emergency Bags)"
+                ],
+            )
+            self.assertEqual(
+                app.INVENTORY_TYPE_WARMER_LINES,
+                classifications["Warmer Lines"],
+            )
+        finally:
+            database.conn.close()
+
     def test_schedule_changes_forecast_not_inventory_count(self):
         database = self.make_legacy_database()
         try:
@@ -146,6 +198,314 @@ class InCenterCompatibilityTests(unittest.TestCase):
                 database.current_count(item)[0],
             )
             self.assertLess(five_session_forecast, four_session_forecast)
+        finally:
+            database.conn.close()
+
+    def test_complete_treatment_uses_selected_supply_path(self):
+        database = self.make_legacy_database()
+        try:
+            database.init_db()
+            database.add_item(
+                app.GROUP_NX,
+                "SAK",
+                baseline_units=10,
+                baseline_date="2026-01-03",
+                units_per_session=1,
+                inventory_type=app.INVENTORY_TYPE_SAK,
+            )
+            database.add_item(
+                app.GROUP_NX,
+                "Emergency Hanging Bags",
+                baseline_units=20,
+                baseline_date="2026-01-03",
+                auto_session_usage=0,
+                inventory_type=app.INVENTORY_TYPE_HANGING_BAGS,
+            )
+            database.add_item(
+                app.GROUP_NX,
+                "Warmer Line Sets",
+                baseline_units=10,
+                baseline_date="2026-01-03",
+                auto_session_usage=0,
+                inventory_type=app.INVENTORY_TYPE_WARMER_LINES,
+            )
+            items = {
+                row["inventory_type"]: row
+                for row in database.items()
+                if row["inventory_type"] != app.INVENTORY_TYPE_STANDARD
+            }
+
+            no_sak_session = database.add_session(
+                "2026-01-03",
+                "Regular Treatment",
+                1,
+                treatment_time="08:00",
+            )
+            no_sak = database.session_by_id(no_sak_session)
+            self.assertEqual(
+                0,
+                database.item_usage_for_session(
+                    items[app.INVENTORY_TYPE_SAK],
+                    no_sak,
+                ),
+            )
+
+            sak_session = database.add_session(
+                "2026-01-04",
+                "Regular Treatment",
+                1,
+                sak_lot="SAK-LOT-1",
+                treatment_time="08:00",
+            )
+            sak_treatment = database.session_by_id(sak_session)
+            self.assertEqual(
+                0.5,
+                database.item_usage_for_session(
+                    items[app.INVENTORY_TYPE_SAK],
+                    sak_treatment,
+                ),
+            )
+
+            bags_session = database.add_session(
+                "2026-01-05",
+                "Regular Treatment",
+                1,
+                warmer_line_lot="WL-LOT-1",
+                hanging_bags_used=6,
+                treatment_time="08:00",
+            )
+            bags_treatment = database.session_by_id(bags_session)
+            self.assertEqual(
+                0,
+                database.item_usage_for_session(
+                    items[app.INVENTORY_TYPE_SAK],
+                    bags_treatment,
+                ),
+            )
+            self.assertEqual(
+                6,
+                database.item_usage_for_session(
+                    items[app.INVENTORY_TYPE_HANGING_BAGS],
+                    bags_treatment,
+                ),
+            )
+            self.assertEqual(
+                1,
+                database.item_usage_for_session(
+                    items[app.INVENTORY_TYPE_WARMER_LINES],
+                    bags_treatment,
+                ),
+            )
+            self.assertEqual(
+                1.0,
+                database.item_session_usage_units(
+                    items[app.INVENTORY_TYPE_SAK],
+                    "2026-01-03",
+                    datetime(2026, 1, 5, 8, 0),
+                ),
+            )
+            self.assertEqual(
+                9,
+                database.current_count(
+                    database.item_by_id(items[app.INVENTORY_TYPE_SAK]["id"])
+                )[0],
+            )
+            self.assertEqual(
+                14,
+                database.current_count(
+                    database.item_by_id(
+                        items[app.INVENTORY_TYPE_HANGING_BAGS]["id"]
+                    )
+                )[0],
+            )
+            self.assertEqual(
+                9,
+                database.current_count(
+                    database.item_by_id(
+                        items[app.INVENTORY_TYPE_WARMER_LINES]["id"]
+                    )
+                )[0],
+            )
+            with self.assertRaises(ValueError):
+                database.add_session(
+                    "2026-01-06",
+                    "Regular Treatment",
+                    1,
+                    sak_lot="SAK-LOT-2",
+                    hanging_bags_used=6,
+                    treatment_time="08:00",
+                )
+        finally:
+            database.conn.close()
+
+    def test_only_one_active_item_can_have_each_special_type(self):
+        database = self.make_legacy_database()
+        try:
+            database.init_db()
+            database.add_item(
+                app.GROUP_NX,
+                "Hanging Bags One",
+                inventory_type=app.INVENTORY_TYPE_HANGING_BAGS,
+            )
+            with self.assertRaises(ValueError):
+                database.add_item(
+                    app.GROUP_DV,
+                    "Hanging Bags Two",
+                    inventory_type=app.INVENTORY_TYPE_HANGING_BAGS,
+                )
+        finally:
+            database.conn.close()
+
+    def test_sak_remainder_expires_after_user_entered_hours(self):
+        database = self.make_legacy_database()
+        try:
+            database.init_db()
+            database.add_item(
+                app.GROUP_NX,
+                "SAK",
+                baseline_units=5,
+                baseline_date="2026-02-01",
+                inventory_type=app.INVENTORY_TYPE_SAK,
+            )
+            item = database.item_by_inventory_type(app.INVENTORY_TYPE_SAK)
+            first_id = database.add_session(
+                "2026-02-01",
+                "Regular Treatment",
+                1,
+                treatment_time="08:00",
+                sak_lot="LOT-A",
+                sak_hours_remaining=10,
+            )
+            self.assertEqual(
+                10,
+                database.session_by_id(first_id)["sak_hours_remaining"],
+            )
+            self.assertEqual(
+                0.5,
+                database.item_session_usage_units(
+                    item,
+                    "2026-02-01",
+                    datetime(2026, 2, 1, 17, 59),
+                ),
+            )
+            self.assertEqual(
+                1.0,
+                database.item_session_usage_units(
+                    item,
+                    "2026-02-01",
+                    datetime(2026, 2, 1, 18, 0),
+                ),
+            )
+            replacement_id = database.add_session(
+                "2026-02-01",
+                "Regular Treatment",
+                1,
+                treatment_time="19:00",
+                sak_lot="LOT-B",
+                sak_hours_remaining=80,
+            )
+            self.assertEqual(
+                80,
+                database.session_by_id(replacement_id)["sak_hours_remaining"],
+            )
+            self.assertEqual(
+                1.5,
+                database.item_session_usage_units(
+                    item,
+                    "2026-02-01",
+                    datetime(2026, 2, 1, 19, 0),
+                ),
+            )
+        finally:
+            database.conn.close()
+
+    def test_second_sak_treatment_consumes_remaining_half(self):
+        database = self.make_legacy_database()
+        try:
+            database.init_db()
+            database.add_item(
+                app.GROUP_NX,
+                "SAK",
+                baseline_units=5,
+                baseline_date="2026-02-01",
+                inventory_type=app.INVENTORY_TYPE_SAK,
+            )
+            database.add_item(
+                app.GROUP_NX,
+                "Hanging Bags",
+                baseline_units=20,
+                baseline_date="2026-02-01",
+                inventory_type=app.INVENTORY_TYPE_HANGING_BAGS,
+            )
+            database.add_item(
+                app.GROUP_NX,
+                "Warmer Lines",
+                baseline_units=10,
+                baseline_date="2026-02-01",
+                inventory_type=app.INVENTORY_TYPE_WARMER_LINES,
+            )
+            item = database.item_by_inventory_type(app.INVENTORY_TYPE_SAK)
+            database.add_session(
+                "2026-02-01",
+                "Regular Treatment",
+                1,
+                treatment_time="08:00",
+                sak_lot="LOT-A",
+                sak_hours_remaining=30,
+            )
+            database.snapshot_item_to_current(
+                item["id"],
+                "2026-02-01",
+                current_value=4.5,
+            )
+            second_id = database.add_session(
+                "2026-02-02",
+                "Regular Treatment",
+                1,
+                treatment_time="08:00",
+                sak_lot="LOT-A",
+                sak_hours_remaining=30,
+            )
+            self.assertEqual(
+                0,
+                database.session_by_id(second_id)["sak_hours_remaining"],
+            )
+            self.assertEqual(
+                1.0,
+                database.item_session_usage_units(
+                    item,
+                    "2026-02-01",
+                    datetime(2026, 2, 2, 8, 0),
+                ),
+            )
+            self.assertEqual(
+                4.0,
+                database.current_count(database.item_by_id(item["id"]))[0],
+            )
+            with self.assertRaises(ValueError):
+                database.add_session(
+                    "2026-02-03",
+                    "Regular Treatment",
+                    1,
+                    treatment_time="08:00",
+                    hanging_bags_used=6,
+                )
+            database.add_session(
+                "2026-02-03",
+                "Regular Treatment",
+                1,
+                treatment_time="08:00",
+                hanging_bags_used=6,
+                warmer_line_lot="WL-LOT-1",
+            )
+            self.assertEqual(
+                1.0,
+                database.item_session_usage_units(
+                    item,
+                    "2026-02-01",
+                    datetime(2026, 2, 3, 8, 0),
+                ),
+            )
         finally:
             database.conn.close()
 
