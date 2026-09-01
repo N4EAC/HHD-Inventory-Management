@@ -1,7 +1,7 @@
 
 #!/usr/bin/env python3
 """
-HHD Inventory Manager v1.5.7
+HHD Inventory Manager v1.5.8
 
 Changes in v0.1.1:
 - Rename inventory items
@@ -30,7 +30,8 @@ import time
 from tkinter import ttk, messagebox, filedialog
 
 APP_NAME = "HHD Inventory Manager"
-APP_VERSION = "1.5.7"
+APP_VERSION = "1.5.8"
+SAK_MAX_HOURS_REMAINING = 89
 DB_NAME = "hhd_inventory.db"
 SETTINGS_FILE = "hhd_inventory_settings.json"
 APP_FOLDER_NAME = "HHD Inventory Manager"
@@ -98,9 +99,19 @@ def validate_sak_hours_remaining(value):
     try:
         hours = int(str(value).strip())
     except (TypeError, ValueError):
-        raise ValueError("SAK hours left must be a whole number from 1 to 80.")
-    if str(hours) != str(value).strip() or hours < 1 or hours > 80:
-        raise ValueError("SAK hours left must be a whole number from 1 to 80.")
+        raise ValueError(
+            f"SAK hours left must be a whole number from 1 to "
+            f"{SAK_MAX_HOURS_REMAINING}."
+        )
+    if (
+        str(hours) != str(value).strip()
+        or hours < 1
+        or hours > SAK_MAX_HOURS_REMAINING
+    ):
+        raise ValueError(
+            f"SAK hours left must be a whole number from 1 to "
+            f"{SAK_MAX_HOURS_REMAINING}."
+        )
     return hours
 
 
@@ -1357,7 +1368,7 @@ class InventoryDB:
         return total
 
     def sak_lifecycle_usage(self, item, sessions, through_date=None):
-        """Return SAK use plus any remainder discarded after 80 hours."""
+        """Return SAK use plus any remainder discarded after its entered life."""
         total = 0.0
         remaining = 0.0
         expires_at = None

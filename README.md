@@ -19,6 +19,12 @@ approve the application in Privacy & Security before its first launch.
 
 <img width="1584" height="988" alt="image" src="https://github.com/user-attachments/assets/3e618332-5457-4214-80de-8d2de28d12d1" />
 
+## New in version 1.5.8
+
+- Increased the allowed **Hours left in SAK after first use** range from 1–80
+  to **1–89 hours**. The suggested value remains 80 and existing databases
+  continue to load without migration.
+
 ## New in version 1.5.7
 
 Version 1.5.7 expands Complete Treatment inventory tracking, improves the
@@ -34,7 +40,7 @@ for installers and release notes.
 - A SAK is deducted from a Complete Treatment only when a SAK lot number is
   entered.
 - Complete Treatments record the treatment time. After the first treatment on
-  a SAK, the user enters the estimated hours remaining (1–80). HHDIM deducts
+  a SAK, the user enters the estimated hours remaining. HHDIM deducts
   the remaining half when it is used by a second SAK treatment, when that time
   expires, or when a later Complete Treatment switches to hanging bags and a
   Warmer Line without a SAK.

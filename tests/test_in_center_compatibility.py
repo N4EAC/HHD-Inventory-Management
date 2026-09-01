@@ -6,6 +6,11 @@ import hhd_inventory_manager as app
 
 
 class InCenterCompatibilityTests(unittest.TestCase):
+    def test_sak_hours_remaining_accepts_up_to_89(self):
+        self.assertEqual(89, app.validate_sak_hours_remaining("89"))
+        with self.assertRaisesRegex(ValueError, "1 to 89"):
+            app.validate_sak_hours_remaining("90")
+
     def make_legacy_database(self):
         connection = sqlite3.connect(":memory:")
         connection.row_factory = sqlite3.Row
