@@ -9,10 +9,10 @@ Release packages are available for Windows and Apple-silicon Macs, with Ubuntu
 24.04 planned next. All platforms use the same SQLite database format so
 databases can be exported and imported between systems.
 
-**[Download HHD Inventory Manager v1.5.7](https://github.com/N4EAC/HHD-Inventory-Management/releases/tag/v1.5.7)**
+**[Download HHD Inventory Manager v1.5.8](https://github.com/N4EAC/HHD-Inventory-Management/releases/tag/v1.5.8)**
 
-- Windows 10/11: `HHD_Inventory_Manager_Setup_v1.5.7.1.exe`
-- Apple-silicon macOS: `HHD_Inventory_Manager_macOS_arm64_v1.5.7.dmg`
+- Windows 10/11: `HHD_Inventory_Manager_Setup_v1.5.8.1.exe`
+- Apple-silicon macOS: `HHD_Inventory_Manager_macOS_arm64_v1.5.8.dmg`
 
 The current macOS package is not Apple-notarized. macOS may require the user to
 approve the application in Privacy & Security before its first launch.
@@ -20,6 +20,9 @@ approve the application in Privacy & Security before its first launch.
 <img width="1584" height="988" alt="image" src="https://github.com/user-attachments/assets/3e618332-5457-4214-80de-8d2de28d12d1" />
 
 ## New in version 1.5.8
+
+See the [v1.5.8 release page](https://github.com/N4EAC/HHD-Inventory-Management/releases/tag/v1.5.8)
+for the Windows installer, Apple-silicon macOS DMG, and release notes.
 
 - Increased the allowed **Hours left in SAK after first use** range from 1–80
   to **1–89 hours**. The suggested value remains 80 and existing databases
