@@ -8,6 +8,7 @@ README.md
 RELEASE_BUILD_INSTRUCTIONS.md
 tests/test_in_center_compatibility.py
 build_exe.bat
+build.linux.sh
 hhd_inventory_manager.ico
 hhd_inventory_manager.png
 hhd_inventory_manager.py

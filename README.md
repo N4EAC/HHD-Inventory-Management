@@ -27,6 +27,16 @@ for the Windows installer, Apple-silicon macOS DMG, and release notes.
 - Increased the allowed **Hours left in SAK after first use** range from 1–80
   to **1–89 hours**. The suggested value remains 80 and existing databases
   continue to load without migration.
+- On the second treatment using the same unexpired SAK, HHDIM now displays and
+  records the approximate wall-clock hours remaining instead of showing zero.
+  The countdown begins when the first-use SAK lot and remaining hours are
+  saved. The second half is still deducted and the SAK is closed after that
+  second prescribed use.
+- The bottom status bar displays the active SAK lot and its approximate hours
+  remaining, refreshing automatically while HHDIM is open.
+- Complete treatments can record optional additional item units. These are
+  deducted on top of the treatment's normal configured inventory usage and are
+  restored if the treatment is deleted.
 
 ## New in version 1.5.7
 
@@ -127,5 +137,8 @@ Developer ID signature and Apple notarization to avoid a Gatekeeper warning.
 
 ### Linux
 
-Ubuntu 24.04 packaging is planned. See `PLATFORM_BUILD_PLAN.md` for the staged
-AppImage/portable archive and `.deb` plan.
+Run `./build.linux.sh` on Linux. It detects the distro, architecture, and
+package manager; installs missing Python/Tk and native build prerequisites;
+runs compatibility tests; and produces a native `.deb`, `.rpm`, or
+`.pkg.tar.zst` where supported. A portable `.tar.gz` is always created. Use
+`./build.linux.sh --help` for noninteractive, no-install, and format options.

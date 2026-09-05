@@ -95,6 +95,28 @@ def treatment_datetime(session):
     )
 
 
+def active_sak_hours_left(active_sak, when):
+    """Return whole clock hours left, rounding a partial hour up."""
+    if not active_sak or when >= active_sak["expires_at"]:
+        return 0
+    seconds_left = (active_sak["expires_at"] - when).total_seconds()
+    return max(0, math.ceil(seconds_left / 3600))
+
+
+def sak_timer_start(session):
+    """Return the saved countdown start, falling back for legacy records."""
+    try:
+        saved = str(session["sak_timer_started_at"] or "").strip()
+    except (KeyError, IndexError):
+        saved = ""
+    if saved:
+        try:
+            return datetime.fromisoformat(saved)
+        except ValueError:
+            pass
+    return treatment_datetime(session)
+
+
 def validate_sak_hours_remaining(value):
     try:
         hours = int(str(value).strip())
@@ -574,6 +596,7 @@ class InventoryDB:
             pak_lot TEXT NOT NULL DEFAULT '',
             sak_lot TEXT NOT NULL DEFAULT '',
             sak_hours_remaining INTEGER NOT NULL DEFAULT 0,
+            sak_timer_started_at TEXT NOT NULL DEFAULT '',
             cartridge_lot TEXT NOT NULL DEFAULT '',
             warmer_line_lot TEXT NOT NULL DEFAULT '',
             hanging_bags_used INTEGER NOT NULL DEFAULT 0,
@@ -650,6 +673,7 @@ class InventoryDB:
             "pak_lot": "TEXT NOT NULL DEFAULT ''",
             "sak_lot": "TEXT NOT NULL DEFAULT ''",
             "sak_hours_remaining": "INTEGER NOT NULL DEFAULT 0",
+            "sak_timer_started_at": "TEXT NOT NULL DEFAULT ''",
             "cartridge_lot": "TEXT NOT NULL DEFAULT ''",
             "warmer_line_lot": "TEXT NOT NULL DEFAULT ''",
             "hanging_bags_used": "INTEGER NOT NULL DEFAULT 0",
@@ -1104,9 +1128,11 @@ class InventoryDB:
                 continue
             hours = int(session["sak_hours_remaining"] or 0)
             if hours > 0:
+                timer_start = sak_timer_start(session) or occurred_at
                 active = {
                     "lot": str(session["sak_lot"]).strip(),
-                    "expires_at": occurred_at + timedelta(hours=hours),
+                    "timer_started_at": timer_start,
+                    "expires_at": timer_start + timedelta(hours=hours),
                 }
         if active and when >= active["expires_at"]:
             return None
@@ -1123,6 +1149,7 @@ class InventoryDB:
         pak_lot="",
         sak_lot="",
         sak_hours_remaining=80,
+        sak_timer_started_at=None,
         cartridge_lot="",
         warmer_line_lot="",
         hanging_bags_used=0,
@@ -1191,6 +1218,7 @@ class InventoryDB:
                     )
 
             stored_sak_hours = 0
+            stored_sak_timer_started_at = ""
             if values["sak_lot"] and treatment_time:
                 used_at = datetime.strptime(
                     f"{session_date} {treatment_time}",
@@ -1201,19 +1229,35 @@ class InventoryDB:
                     active
                     and active["lot"].casefold() == values["sak_lot"].casefold()
                 )
-                if not continuing_same_sak:
+                if continuing_same_sak:
+                    stored_sak_hours = active_sak_hours_left(active, used_at)
+                else:
                     stored_sak_hours = validate_sak_hours_remaining(
                         sak_hours_remaining
                     )
+                    if sak_timer_started_at is None:
+                        # Programmatic/legacy callers retain treatment-time
+                        # semantics. The UI supplies the actual save time.
+                        stored_sak_timer_started_at = used_at.isoformat(
+                            timespec="seconds"
+                        )
+                    else:
+                        timer_start = datetime.fromisoformat(
+                            str(sak_timer_started_at).strip()
+                        )
+                        stored_sak_timer_started_at = timer_start.isoformat(
+                            timespec="seconds"
+                        )
 
         cursor = self.conn.execute(
             """INSERT INTO session_log(
                    session_date, treatment_time, session_type,
                    session_equivalent, notes,
-                   pak_lot, sak_lot, sak_hours_remaining, cartridge_lot,
+                   pak_lot, sak_lot, sak_hours_remaining,
+                   sak_timer_started_at, cartridge_lot,
                    warmer_line_lot, hanging_bags_used,
                    cycler_serial, pureflow_serial
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 session_date,
                 treatment_time,
@@ -1223,6 +1267,7 @@ class InventoryDB:
                 values["pak_lot"],
                 values["sak_lot"],
                 stored_sak_hours if str(session_type).strip() == "Regular Treatment" else 0,
+                stored_sak_timer_started_at if str(session_type).strip() == "Regular Treatment" else "",
                 values["cartridge_lot"],
                 values["warmer_line_lot"],
                 hanging_bags_used,
@@ -1266,19 +1311,26 @@ class InventoryDB:
             (session_id,),
         ).fetchall()
 
+    def explicit_item_usage_for_session(self, item_id, session_id):
+        row = self.conn.execute(
+            """SELECT COALESCE(SUM(units_used),0) AS total
+               FROM session_item_usage
+               WHERE session_id=? AND item_id=?""",
+            (session_id, item_id),
+        ).fetchone()
+        return float(row["total"] or 0)
+
     def item_usage_for_session(self, item, session):
         treatment_key = treatment_type_key(session["session_type"])
         if treatment_key in {"missed", "in_center"}:
             return 0.0
 
+        explicit_usage = self.explicit_item_usage_for_session(
+            item["id"],
+            session["id"],
+        )
+
         if treatment_key == "incomplete":
-            row = self.conn.execute(
-                """SELECT COALESCE(SUM(units_used),0) AS total
-                   FROM session_item_usage
-                   WHERE session_id=? AND item_id=?""",
-                (session["id"], item["id"]),
-            ).fetchone()
-            explicit_usage = float(row["total"] or 0)
             if explicit_usage > 0:
                 return explicit_usage
 
@@ -1304,22 +1356,27 @@ class InventoryDB:
             item["inventory_type"] == INVENTORY_TYPE_HANGING_BAGS
             and str(session["session_type"]).strip() == "Regular Treatment"
         ):
-            return float(session["hanging_bags_used"] or 0)
+            return float(session["hanging_bags_used"] or 0) + explicit_usage
 
         if str(session["session_type"]).strip() == "Regular Treatment":
             if item["inventory_type"] == INVENTORY_TYPE_WARMER_LINES:
-                return 1.0 if str(session["warmer_line_lot"] or "").strip() else 0.0
+                automatic = (
+                    1.0
+                    if str(session["warmer_line_lot"] or "").strip()
+                    else 0.0
+                )
+                return automatic + explicit_usage
             if item["inventory_type"] == INVENTORY_TYPE_SAK:
                 if str(session["treatment_time"] or "").strip():
                     if (
                         not str(session["sak_lot"] or "").strip()
                         or int(session["hanging_bags_used"] or 0) > 0
                     ):
-                        return 0.0
-                    return 0.5
+                        return explicit_usage
+                    return 0.5 + explicit_usage
 
         if int(item["auto_session_usage"] or 0) != 1:
-            return 0.0
+            return explicit_usage
 
         reusable = max(float(item["reusable_sessions"] or 1), 1.0)
         treatment_equivalent = float(session["session_equivalent"] or 1)
@@ -1332,7 +1389,7 @@ class InventoryDB:
         if int(item["disallow_half_usage"] or 0) == 1:
             amount = math.ceil(amount - 1e-9)
 
-        return float(amount)
+        return float(amount) + explicit_usage
 
     def item_session_usage_units(self, item, since_date, through_date=None):
         """Calculate actual units used after the item's current baseline."""
@@ -1381,6 +1438,16 @@ class InventoryDB:
                 total += self.item_usage_for_session(item, session)
                 continue
 
+            treatment_key = treatment_type_key(session["session_type"])
+            if treatment_key == "incomplete":
+                total += self.item_usage_for_session(item, session)
+                continue
+            if treatment_key not in {"missed", "in_center"}:
+                total += self.explicit_item_usage_for_session(
+                    item["id"],
+                    session["id"],
+                )
+
             if (
                 remaining > 0
                 and occurred_at >= expires_at
@@ -1423,8 +1490,19 @@ class InventoryDB:
                     # inventory baseline; this row closes that prior SAK.
                     total += 0.5
                     continue
+                prior_active = self.active_sak_at(occurred_at)
+                if (
+                    prior_active
+                    and prior_active["lot"].casefold() == lot.casefold()
+                ):
+                    # A baseline or date filter may omit the first-use row.
+                    # The positive hours stored here are the calculated clock
+                    # hours at second use, not the start of another SAK.
+                    total += 0.5
+                    continue
                 remaining = 1.0
-                expires_at = occurred_at + timedelta(hours=hours)
+                timer_start = sak_timer_start(session) or occurred_at
+                expires_at = timer_start + timedelta(hours=hours)
                 active_lot = lot
 
             used_now = min(0.5, remaining)
@@ -2187,6 +2265,15 @@ class HHDApp(tk.Tk):
 
         self.statusbar = tk.Frame(self, bg=STATUS_BG, height=24, highlightbackground=BORDER, highlightthickness=1)
         self.statusbar.pack(fill="x", side="bottom")
+        self.sak_status_label = tk.Label(
+            self.statusbar,
+            text="SAK: No active timer  ",
+            bg=STATUS_BG,
+            fg=CYAN,
+            anchor="e",
+            font=("Segoe UI", 9, "bold"),
+        )
+        self.sak_status_label.pack(side="right", padx=(12, 8))
         self.statusbar_label = tk.Label(
             self.statusbar,
             text=f"  Data is stored locally in {DB_NAME}    |    Version {APP_VERSION}",
@@ -2195,7 +2282,7 @@ class HHDApp(tk.Tk):
             anchor="w",
             font=("Segoe UI", 9),
         )
-        self.statusbar_label.pack(fill="both")
+        self.statusbar_label.pack(side="left", fill="x", expand=True)
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.bind("<Configure>", self.remember_window_geometry_event)
@@ -2912,7 +2999,35 @@ class HHDApp(tk.Tk):
     def schedule_clock_update(self):
         if hasattr(self, "datetime_label"):
             self.datetime_label.config(text=datetime.now().strftime("%A, %B %d, %Y   %I:%M %p"))
+        self.update_sak_status()
         self.after(30000, self.schedule_clock_update)
+
+    def update_sak_status(self):
+        """Refresh the bottom-bar countdown for the active half-used SAK."""
+        if not hasattr(self, "sak_status_label"):
+            return
+        try:
+            active_sak = self.db.active_sak_at(datetime.now())
+            if active_sak:
+                hours_left = active_sak_hours_left(
+                    active_sak,
+                    datetime.now(),
+                )
+                lot = active_sak["lot"]
+                self.sak_status_label.configure(
+                    text=f"SAK {lot}: ~{hours_left}h left  ",
+                    fg=YELLOW if hours_left <= 12 else GREEN,
+                )
+            else:
+                self.sak_status_label.configure(
+                    text="SAK: No active timer  ",
+                    fg=MUTED,
+                )
+        except (sqlite3.Error, TypeError, ValueError):
+            self.sak_status_label.configure(
+                text="SAK timer unavailable  ",
+                fg=RED,
+            )
 
     def themed_dialog(
         self,
@@ -3314,6 +3429,8 @@ class HHDApp(tk.Tk):
             self.statusbar.configure(bg=STATUS_BG, highlightbackground=BORDER)
         if hasattr(self, "statusbar_label"):
             self.statusbar_label.configure(bg=STATUS_BG, fg=MUTED)
+        if hasattr(self, "sak_status_label"):
+            self.sak_status_label.configure(bg=STATUS_BG)
 
         self.configure_styles()
         self.create_status_led_images()
@@ -4412,6 +4529,12 @@ class HHDApp(tk.Tk):
                     "SAK hours left after first use: "
                     f"{record.get('sak_hours_remaining', 0)}"
                     if int(record.get("sak_hours_remaining", 0) or 0) > 0
+                    else ""
+                ),
+                (
+                    "SAK timer started: "
+                    f"{record.get('sak_timer_started_at', '')}"
+                    if record.get("sak_timer_started_at")
                     else ""
                 ),
                 (
@@ -5825,9 +5948,12 @@ class HHDApp(tk.Tk):
             padx=10,
             pady=8,
         )
+        usage_panel_title = tk.StringVar(
+            value="Incomplete Treatment — Actual Items Used"
+        )
         tk.Label(
             custom_frame,
-            text="Incomplete Treatment — Actual Items Used",
+            textvariable=usage_panel_title,
             bg=PANEL_TITLE_BG,
             fg=CYAN,
             font=("Segoe UI", 11, "bold"),
@@ -5978,23 +6104,28 @@ class HHDApp(tk.Tk):
                 "0" if incomplete or missed or in_center else "1"
             )
 
-            if incomplete:
+            if incomplete or complete:
                 custom_frame.grid()
             else:
                 custom_frame.grid_remove()
+            usage_panel_title.set(
+                "Incomplete Treatment — Actual Items Used"
+                if incomplete
+                else "Complete Treatment — Additional Items Used (Optional)"
+            )
             scroll_body.after_idle(update_treatment_scroll_region)
 
             item_combo.configure(
-                state="readonly" if incomplete else "disabled"
+                state="readonly" if incomplete or complete else "disabled"
             )
             units_combo.configure(
-                state="readonly" if incomplete else "disabled"
+                state="readonly" if incomplete or complete else "disabled"
             )
             add_usage_button.configure(
-                state="normal" if incomplete else "disabled"
+                state="normal" if incomplete or complete else "disabled"
             )
             remove_usage_button.configure(
-                state="normal" if incomplete else "disabled"
+                state="normal" if incomplete or complete else "disabled"
             )
 
             for entry in identity_entries:
@@ -6037,7 +6168,9 @@ class HHDApp(tk.Tk):
                 except ValueError:
                     continuing_sak = False
             if continuing_sak:
-                identity_vars["sak_hours_remaining"].set("0")
+                identity_vars["sak_hours_remaining"].set(
+                    str(active_sak_hours_left(active_sak, selected_at))
+                )
                 sak_hours_entry.configure(state="disabled")
             elif using_sak:
                 if identity_vars["sak_hours_remaining"].get() == "0":
@@ -6140,6 +6273,9 @@ class HHDApp(tk.Tk):
                         if session_type == "Complete Treatment" and sak_lot
                         else 80
                     ),
+                    sak_timer_started_at=datetime.now().isoformat(
+                        timespec="seconds"
+                    ),
                     cartridge_lot=(
                         identity_vars["cartridge_lot"].get()
                         if record_identity else ""
@@ -6159,7 +6295,10 @@ class HHDApp(tk.Tk):
                     ),
                 )
 
-                if "Incomplete" in session_type:
+                if session_type in {
+                    "Incomplete Treatment",
+                    "Complete Treatment",
+                }:
                     for item_id, _label, units in pending:
                         self.db.add_session_item_usage(
                             session_id,
@@ -6169,6 +6308,7 @@ class HHDApp(tk.Tk):
 
                 self.db.mark_treatment_inventory_update(session_id)
                 self.db.backup_database("change")
+                self.update_sak_status()
                 self.show_log_session()
                 self.after(50, self.show_treatment_saved_dialog)
             except Exception as ex:
@@ -6413,6 +6553,7 @@ class HHDApp(tk.Tk):
                     self.db.backup_database("change")
                     self.db.delete_session(session_id)
                     self.db.backup_database("change")
+                    self.update_sak_status()
                     self.show_treatment_history()
                     self.themed_dialog(
                         "Treatment Deleted",

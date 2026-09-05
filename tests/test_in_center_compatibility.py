@@ -107,6 +107,7 @@ class InCenterCompatibilityTests(unittest.TestCase):
             self.assertIn("hanging_bags_used", session_columns)
             self.assertIn("treatment_time", session_columns)
             self.assertIn("sak_hours_remaining", session_columns)
+            self.assertIn("sak_timer_started_at", session_columns)
         finally:
             database.conn.close()
 
@@ -361,6 +362,78 @@ class InCenterCompatibilityTests(unittest.TestCase):
         finally:
             database.conn.close()
 
+    def test_complete_treatment_adds_optional_extra_item_usage(self):
+        database = self.make_legacy_database()
+        try:
+            database.init_db()
+            database.add_item(
+                app.GROUP_NX,
+                "Extra-use supply",
+                baseline_units=10,
+                baseline_date="2026-01-03",
+                units_per_session=1,
+            )
+            item = next(
+                row
+                for row in database.items()
+                if row["item_name"] == "Extra-use supply"
+            )
+            item_id = item["id"]
+            session_id = database.add_session(
+                "2026-01-04",
+                "Regular Treatment",
+                1,
+                treatment_time="08:00",
+            )
+            database.add_session_item_usage(session_id, item_id, 2.5)
+            item = database.item_by_id(item_id)
+            session = database.session_by_id(session_id)
+            self.assertEqual(
+                3.5,
+                database.item_usage_for_session(item, session),
+            )
+            self.assertEqual(6.5, database.current_count(item)[0])
+
+            database.delete_session(session_id)
+            self.assertEqual(
+                10.0,
+                database.current_count(database.item_by_id(item_id))[0],
+            )
+        finally:
+            database.conn.close()
+
+    def test_complete_treatment_adds_extra_usage_to_sak_lifecycle(self):
+        database = self.make_legacy_database()
+        try:
+            database.init_db()
+            database.add_item(
+                app.GROUP_NX,
+                "SAK",
+                baseline_units=5,
+                baseline_date="2026-02-01",
+                inventory_type=app.INVENTORY_TYPE_SAK,
+            )
+            item = database.item_by_inventory_type(app.INVENTORY_TYPE_SAK)
+            session_id = database.add_session(
+                "2026-02-02",
+                "Regular Treatment",
+                1,
+                treatment_time="08:00",
+                sak_lot="SAK-EXTRA",
+                sak_hours_remaining=80,
+            )
+            database.add_session_item_usage(session_id, item["id"], 0.5)
+            self.assertEqual(
+                1.0,
+                database.item_session_usage_units(
+                    item,
+                    "2026-02-01",
+                    datetime(2026, 2, 2, 8, 1),
+                ),
+            )
+        finally:
+            database.conn.close()
+
     def test_sak_remainder_expires_after_user_entered_hours(self):
         database = self.make_legacy_database()
         try:
@@ -472,7 +545,7 @@ class InCenterCompatibilityTests(unittest.TestCase):
                 sak_hours_remaining=30,
             )
             self.assertEqual(
-                0,
+                6,
                 database.session_by_id(second_id)["sak_hours_remaining"],
             )
             self.assertEqual(
@@ -510,6 +583,111 @@ class InCenterCompatibilityTests(unittest.TestCase):
                     "2026-02-01",
                     datetime(2026, 2, 3, 8, 0),
                 ),
+            )
+        finally:
+            database.conn.close()
+
+    def test_second_sak_treatment_stores_calculated_clock_hours_left(self):
+        database = self.make_legacy_database()
+        try:
+            database.init_db()
+            database.add_item(
+                app.GROUP_NX,
+                "SAK",
+                baseline_units=5,
+                baseline_date="2026-09-01",
+                inventory_type=app.INVENTORY_TYPE_SAK,
+            )
+            item = database.item_by_inventory_type(app.INVENTORY_TYPE_SAK)
+            database.add_session(
+                "2026-09-01",
+                "Regular Treatment",
+                1,
+                treatment_time="08:00",
+                sak_lot="LOT-87",
+                sak_hours_remaining=87,
+                sak_timer_started_at="2026-09-01T12:00:00",
+            )
+            active_sak = database.active_sak_at(datetime(2026, 9, 4, 12, 0))
+            self.assertEqual("LOT-87", active_sak["lot"])
+            self.assertEqual(
+                15,
+                app.active_sak_hours_left(
+                    active_sak,
+                    datetime(2026, 9, 4, 12, 0),
+                ),
+            )
+            second_id = database.add_session(
+                "2026-09-04",
+                "Regular Treatment",
+                1,
+                treatment_time="12:00",
+                sak_lot="LOT-87",
+                sak_hours_remaining=87,
+            )
+            self.assertEqual(
+                15,
+                database.session_by_id(second_id)["sak_hours_remaining"],
+            )
+            self.assertEqual(
+                1.0,
+                database.item_session_usage_units(
+                    item,
+                    "2026-09-01",
+                    datetime(2026, 9, 4, 12, 0),
+                ),
+            )
+            self.assertIsNone(
+                database.active_sak_at(datetime(2026, 9, 4, 12, 1))
+            )
+        finally:
+            database.conn.close()
+
+    def test_deleting_sak_treatment_restores_previous_timer_state(self):
+        database = self.make_legacy_database()
+        try:
+            database.init_db()
+            database.add_item(
+                app.GROUP_NX,
+                "SAK",
+                baseline_units=5,
+                baseline_date="2026-09-01",
+                inventory_type=app.INVENTORY_TYPE_SAK,
+            )
+            first_id = database.add_session(
+                "2026-09-01",
+                "Regular Treatment",
+                1,
+                treatment_time="08:00",
+                sak_lot="LOT-DELETE",
+                sak_hours_remaining=87,
+                sak_timer_started_at="2026-09-01T12:00:00",
+            )
+            second_id = database.add_session(
+                "2026-09-04",
+                "Regular Treatment",
+                1,
+                treatment_time="12:00",
+                sak_lot="LOT-DELETE",
+            )
+            self.assertIsNone(
+                database.active_sak_at(datetime(2026, 9, 4, 12, 1))
+            )
+
+            database.delete_session(second_id)
+            restored = database.active_sak_at(datetime(2026, 9, 4, 12, 1))
+            self.assertEqual("LOT-DELETE", restored["lot"])
+            self.assertEqual(
+                15,
+                app.active_sak_hours_left(
+                    restored,
+                    datetime(2026, 9, 4, 12, 1),
+                ),
+            )
+
+            database.delete_session(first_id)
+            self.assertIsNone(
+                database.active_sak_at(datetime(2026, 9, 4, 12, 1))
             )
         finally:
             database.conn.close()

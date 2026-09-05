@@ -23,21 +23,20 @@ The first local `.app` and DMG builds use an ad-hoc development signature.
 They are suitable for testing, but public distribution without Developer ID
 signing and notarization will trigger a macOS Gatekeeper warning.
 
-## Ubuntu 24.04 — planned
+## Linux — builder ready for testing
 
-1. Develop and test in a clean Ubuntu 24.04 environment with Python 3,
-   `python3-tk`, `python3-venv`, and the standard build toolchain installed.
-2. Build with PyInstaller on Ubuntu 24.04; do not reuse Windows or macOS
-   binaries because PyInstaller packages are operating-system-specific.
-3. Adopt XDG locations (`$XDG_DATA_HOME`, falling back to
-   `~/.local/share`) for the database and settings.
-4. Add a `.desktop` launcher and install icons at freedesktop-standard sizes.
-5. Validate under the default Ubuntu desktop on both X11 and Wayland.
-6. Produce an initial portable archive or AppImage for testing.
-7. Produce a `.deb` package after the installation paths and desktop
-   integration are stable.
-8. Add an Ubuntu 24.04 GitHub Actions build after local validation, then
-   publish Linux packages as pre-release assets until field-tested.
+Run `./build.linux.sh` on the target distribution. It detects the distro,
+architecture, and package manager, installs build prerequisites, creates an
+isolated Python environment, runs tests, and packages the PyInstaller output.
+
+- Debian, Ubuntu, Mint, and derivatives: `.deb`
+- Fedora, RHEL, Rocky, AlmaLinux, openSUSE, and derivatives: `.rpm`
+- Arch, Manjaro, EndeavourOS, and derivatives: `.pkg.tar.zst`
+- Every distribution: portable `.tar.gz`
+
+Use `--no-install` when dependencies are externally managed, `--yes` for
+noninteractive installation, and `--format` to override detection. Builds must
+run on Linux; Windows and macOS PyInstaller output cannot be reused.
 
 ## Release gates for every platform
 
