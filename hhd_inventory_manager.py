@@ -2233,6 +2233,10 @@ class HHDApp(tk.Tk):
             BORDER,
             self.theme_palette.get("dark_titlebar", True),
         )
+        if sys.platform.startswith("linux"):
+            # GNOME may replace _NET_WM_ICON while the X11 window is first
+            # mapped. Reapply it once the mapped window is owned by Tk.
+            self.after(250, self.set_app_icon)
 
         self.inventory_font_default = 12
         self.inventory_font_min = self.inventory_font_default - 5

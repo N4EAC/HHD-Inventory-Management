@@ -7,7 +7,9 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 cd "$ROOT"
 APP_VERSION="1.5.8"
 PKG="hhd-inventory-manager"
-EXE="HHD_Inventory_Manager"
+# Keep the executable basename identical to the freedesktop desktop-file ID.
+# GNOME uses this as a fallback when matching a running window to its launcher.
+EXE="$PKG"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 FORMAT=auto
 INSTALL_DEPS=1
