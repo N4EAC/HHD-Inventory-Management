@@ -2931,14 +2931,26 @@ class HHDApp(tk.Tk):
 
 
     def set_app_icon(self):
-        """Set the Windows taskbar/Alt-Tab/window icon as reliably as Tk allows."""
+        """Set the taskbar, dock, Alt-Tab, and window icon as reliably as Tk allows."""
         try:
             self.iconbitmap(icon_path())
         except Exception:
             pass
         try:
-            self._app_icon_photo = tk.PhotoImage(file=icon_png_path())
-            self.iconphoto(True, self._app_icon_photo)
+            source_icon = tk.PhotoImage(file=icon_png_path())
+            if sys.platform.startswith("linux"):
+                # Some Linux window managers reject or ignore a lone 1024px
+                # _NET_WM_ICON and display Tk's generic yellow icon instead.
+                # Supply several conventional sizes and retain every PhotoImage.
+                self._app_icon_photos = [
+                    source_icon.subsample(4),   # 256px
+                    source_icon.subsample(16),  # 64px
+                    source_icon.subsample(32),  # 32px
+                ]
+                self.iconphoto(True, *self._app_icon_photos)
+            else:
+                self._app_icon_photos = [source_icon]
+                self.iconphoto(True, source_icon)
         except Exception:
             pass
 

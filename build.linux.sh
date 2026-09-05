@@ -131,8 +131,9 @@ APP="$BUILD/app/$EXE"; [[ -x "$APP/$EXE" ]] || die "Incomplete PyInstaller outpu
 
 log "Creating freedesktop payload"
 install -d "$STAGE/opt/$PKG" "$STAGE/usr/bin" "$STAGE/usr/share/applications" \
-  "$STAGE/usr/share/doc/$PKG"
+  "$STAGE/usr/share/doc/$PKG" "$STAGE/usr/share/pixmaps"
 cp -a "$APP/." "$STAGE/opt/$PKG/"
+install -m644 "$ROOT/hhd_inventory_manager.png" "$STAGE/usr/share/pixmaps/$PKG.png"
 for size in 16 32 48 64 128 256 512; do
   icon_dir="$STAGE/usr/share/icons/hicolor/${size}x${size}/apps"
   install -d "$icon_dir"
@@ -147,11 +148,12 @@ Type=Application
 Name=HHD Inventory Manager
 Comment=Track home hemodialysis inventory and treatments
 Exec=$PKG
-Icon=$PKG
+Icon=/usr/share/pixmaps/$PKG.png
 Terminal=false
 Categories=Office;Utility;
 StartupNotify=true
 StartupWMClass=HHDInventoryManager
+X-GNOME-UsesNotifications=false
 EOF
 
 PORT="$BUILD/$PKG-$APP_VERSION-$ARCH"; mkdir -p "$PORT"; cp -a "$APP/." "$PORT/"
@@ -212,6 +214,7 @@ cp -a %{_sourcedir}/payload/. %{buildroot}/
 /usr/bin/$PKG
 /usr/share/applications/$PKG.desktop
 /usr/share/icons/hicolor/*/apps/$PKG.png
+/usr/share/pixmaps/$PKG.png
 /usr/share/doc/$PKG
 %post
 command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -f -t /usr/share/icons/hicolor || true
