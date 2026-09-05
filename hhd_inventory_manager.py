@@ -2205,7 +2205,12 @@ class ColorButton(tk.Label):
 
 class HHDApp(tk.Tk):
     def __init__(self):
-        super().__init__()
+        if sys.platform.startswith("linux"):
+            # Keep the X11/Wayland window identity aligned with the installed
+            # freedesktop launcher so GNOME/KDE can associate the proper icon.
+            super().__init__(className="HHDInventoryManager")
+        else:
+            super().__init__()
         self.startup_cancelled = False
         self.db = InventoryDB()
         self.settings_data = self.load_local_settings()

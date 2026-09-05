@@ -115,7 +115,7 @@ rm -rf -- "$BUILD"; mkdir -p "$BUILD" "$DIST"
 log "Creating isolated build environment"
 "$PYTHON_BIN" -m venv "$BUILD/venv"
 VPY="$BUILD/venv/bin/python"
-"$VPY" -m pip install --upgrade pip setuptools wheel pyinstaller
+"$VPY" -m pip install --upgrade pip setuptools wheel pyinstaller pillow
 if [[ $RUN_TESTS -eq 1 ]]; then
   "$VPY" -m py_compile hhd_inventory_manager.py
   "$VPY" -m unittest discover -s tests -p 'test_*.py' -v
@@ -131,11 +131,16 @@ APP="$BUILD/app/$EXE"; [[ -x "$APP/$EXE" ]] || die "Incomplete PyInstaller outpu
 
 log "Creating freedesktop payload"
 install -d "$STAGE/opt/$PKG" "$STAGE/usr/bin" "$STAGE/usr/share/applications" \
-  "$STAGE/usr/share/icons/hicolor/256x256/apps" "$STAGE/usr/share/doc/$PKG"
+  "$STAGE/usr/share/doc/$PKG"
 cp -a "$APP/." "$STAGE/opt/$PKG/"
-install -m644 hhd_inventory_manager.png "$STAGE/usr/share/icons/hicolor/256x256/apps/$PKG.png"
+for size in 16 32 48 64 128 256 512; do
+  icon_dir="$STAGE/usr/share/icons/hicolor/${size}x${size}/apps"
+  install -d "$icon_dir"
+  "$VPY" -c 'from PIL import Image; import sys; Image.open(sys.argv[1]).resize((int(sys.argv[3]), int(sys.argv[3])), Image.Resampling.LANCZOS).save(sys.argv[2])' \
+    "$ROOT/hhd_inventory_manager.png" "$icon_dir/$PKG.png" "$size"
+done
 install -m644 README.md LICENSE "$STAGE/usr/share/doc/$PKG/"
-printf '#!/bin/sh\nexec /opt/%s/%s "$@"\n' "$PKG" "$EXE" >"$STAGE/usr/bin/$PKG"; chmod 755 "$STAGE/usr/bin/$PKG"
+printf '#!/bin/sh\nexport BAMF_DESKTOP_FILE_HINT=/usr/share/applications/%s.desktop\nexec /opt/%s/%s "$@"\n' "$PKG" "$PKG" "$EXE" >"$STAGE/usr/bin/$PKG"; chmod 755 "$STAGE/usr/bin/$PKG"
 cat >"$STAGE/usr/share/applications/$PKG.desktop" <<EOF
 [Desktop Entry]
 Type=Application
@@ -146,7 +151,7 @@ Icon=$PKG
 Terminal=false
 Categories=Office;Utility;
 StartupNotify=true
-StartupWMClass=$EXE
+StartupWMClass=HHDInventoryManager
 EOF
 
 PORT="$BUILD/$PKG-$APP_VERSION-$ARCH"; mkdir -p "$PORT"; cp -a "$APP/." "$PORT/"
@@ -164,9 +169,25 @@ Architecture: $DEB_ARCH
 Installed-Size: $size
 Maintainer: HHD Inventory Manager Project <noreply@n4eac.com>
 Depends: libc6, libx11-6, libxext6, libxrender1, libxft2, libfontconfig1
+Recommends: hicolor-icon-theme, desktop-file-utils
 Description: Home hemodialysis inventory and treatment manager
  Tracks supplies, treatment activity, lots and inventory history locally.
 EOF
+  cat >"$STAGE/DEBIAN/postinst" <<'EOF'
+#!/bin/sh
+set -e
+command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -f -t /usr/share/icons/hicolor || true
+command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database /usr/share/applications || true
+exit 0
+EOF
+  cat >"$STAGE/DEBIAN/postrm" <<'EOF'
+#!/bin/sh
+set -e
+command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -f -t /usr/share/icons/hicolor || true
+command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database /usr/share/applications || true
+exit 0
+EOF
+  chmod 755 "$STAGE/DEBIAN/postinst" "$STAGE/DEBIAN/postrm"
   dpkg-deb --build --root-owner-group "$STAGE" "$DIST/${PKG}_${APP_VERSION}_${DEB_ARCH}.deb"
 }
 build_rpm() {
@@ -190,8 +211,14 @@ cp -a %{_sourcedir}/payload/. %{buildroot}/
 /opt/$PKG
 /usr/bin/$PKG
 /usr/share/applications/$PKG.desktop
-/usr/share/icons/hicolor/256x256/apps/$PKG.png
+/usr/share/icons/hicolor/*/apps/$PKG.png
 /usr/share/doc/$PKG
+%post
+command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -f -t /usr/share/icons/hicolor || true
+command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database /usr/share/applications || true
+%postun
+command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -f -t /usr/share/icons/hicolor || true
+command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database /usr/share/applications || true
 EOF
   rpmbuild --define "_topdir $top" -bb "$top/SPECS/$PKG.spec"
   find "$top/RPMS" -type f -name '*.rpm' -exec cp -v {} "$DIST/" \;

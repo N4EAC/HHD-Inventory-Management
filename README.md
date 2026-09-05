@@ -142,3 +142,6 @@ package manager; installs missing Python/Tk and native build prerequisites;
 runs compatibility tests; and produces a native `.deb`, `.rpm`, or
 `.pkg.tar.zst` where supported. A portable `.tar.gz` is always created. Use
 `./build.linux.sh --help` for noninteractive, no-install, and format options.
+Linux packages install correctly sized freedesktop icons and refresh desktop
+icon caches so GNOME, KDE, application menus, docks, and Alt-Tab can associate
+the running HHDIM window with its launcher.
