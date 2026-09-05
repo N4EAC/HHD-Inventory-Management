@@ -154,7 +154,9 @@ Icon=/usr/share/pixmaps/$PKG.png
 Terminal=false
 Categories=Office;Utility;
 StartupNotify=true
-StartupWMClass=HHDInventoryManager
+# Tk normalizes the resource class supplied as HHDInventoryManager to this
+# exact value on X11. GNOME's launcher matching is case-sensitive.
+StartupWMClass=Hhdinventorymanager
 X-GNOME-UsesNotifications=false
 EOF
 
