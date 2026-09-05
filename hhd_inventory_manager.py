@@ -2377,6 +2377,14 @@ class HHDApp(tk.Tk):
         def clear_page():
             for child in page.winfo_children():
                 child.destroy()
+            # Linux/X11 can retain the pixels of label-based buttons when the
+            # widget that handled ButtonRelease destroys itself and its peers.
+            # Complete destruction and repaint before constructing the next page.
+            page.update_idletasks()
+
+        def navigate(callback):
+            """Change wizard pages after the current Tk input event completes."""
+            win.after_idle(callback)
 
         def finish_setup():
             self.db.set_setting("first_run_setup_complete", "1")
@@ -2458,7 +2466,7 @@ class HHDApp(tk.Tk):
             self.button(
                 page,
                 "Set Up as a New User",
-                show_identity,
+                lambda: navigate(show_identity),
             ).pack(fill="x")
             self.button(
                 page,
@@ -2599,11 +2607,15 @@ class HHDApp(tk.Tk):
                     first_session_day_var.get(),
                 )
                 provider_var.set(provider_one)
-                show_inventory_choice()
+                navigate(show_inventory_choice)
 
             actions = tk.Frame(page, bg=BLUE_PANEL)
             actions.pack(side="bottom", fill="x", pady=(26, 0))
-            self.button(actions, "Back", show_welcome).pack(side="left")
+            self.button(
+                actions,
+                "Back",
+                lambda: navigate(show_welcome),
+            ).pack(side="left")
             self.button(actions, "Continue", save_identity).pack(side="right")
             if first_entry:
                 first_entry.focus_set()
@@ -2628,7 +2640,7 @@ class HHDApp(tk.Tk):
             self.button(
                 page,
                 "Enter Initial Inventory",
-                show_inventory_entry,
+                lambda: navigate(show_inventory_entry),
             ).pack(fill="x", pady=(0, 12))
             self.button(
                 page,
