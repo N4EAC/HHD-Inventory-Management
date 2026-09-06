@@ -2,6 +2,9 @@
 
 ![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows11&logoColor=white)
 ![macOS](https://img.shields.io/badge/macOS-Apple%20silicon-000000?logo=apple&logoColor=white)
+![Linux](https://img.shields.io/badge/Linux-x86--64-FCC624?logo=linux&logoColor=black)
+![Ubuntu](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-DEB-E95420?logo=ubuntu&logoColor=white)
+![Fedora](https://img.shields.io/badge/Fedora-RPM-51A2DA?logo=fedora&logoColor=white)
 
 HHD Inventory Manager was created to help home hemodialysis patients and caregivers organize treatment supplies, record treatment activity, and maintain a clear history of inventory and treatment information.
 
