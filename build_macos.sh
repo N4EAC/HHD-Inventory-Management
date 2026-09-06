@@ -2,7 +2,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
-APP_VERSION="1.5.8"
+APP_VERSION="1.5.9"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 echo "Building HHD Inventory Manager v${APP_VERSION} for macOS"
@@ -80,4 +80,4 @@ hdiutil create \
 echo
 echo "Build complete: dist/macos/HHD Inventory Manager.app"
 echo "DMG complete: ${DMG_FILE}"
-echo "This local build is unsigned. Apple notarization is required for public distribution."
+echo "This local build is ad-hoc signed, not Developer ID signed or notarized."

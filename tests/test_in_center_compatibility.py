@@ -6,6 +6,14 @@ import hhd_inventory_manager as app
 
 
 class InCenterCompatibilityTests(unittest.TestCase):
+    def test_extra_is_a_distinct_inventory_using_treatment_type(self):
+        self.assertEqual("extra", app.treatment_type_key("Extra Treatment"))
+        self.assertTrue(app.treatment_uses_inventory("Extra Treatment"))
+        self.assertTrue(app.treatment_supports_sak("Extra Treatment"))
+        self.assertTrue(
+            app.treatment_supports_complete_supplies("Extra Treatment")
+        )
+
     def test_sak_hours_remaining_accepts_up_to_89(self):
         self.assertEqual(89, app.validate_sak_hours_remaining("89"))
         with self.assertRaisesRegex(ValueError, "1 to 89"):
@@ -399,6 +407,140 @@ class InCenterCompatibilityTests(unittest.TestCase):
                 10.0,
                 database.current_count(database.item_by_id(item_id))[0],
             )
+        finally:
+            database.conn.close()
+
+    def test_extra_treatment_uses_sak_and_additional_items(self):
+        database = self.make_legacy_database()
+        try:
+            database.init_db()
+            database.add_item(
+                app.GROUP_NX,
+                "SAK",
+                baseline_units=5,
+                baseline_date="2026-02-01",
+                inventory_type=app.INVENTORY_TYPE_SAK,
+            )
+            database.add_item(
+                app.GROUP_NX,
+                "Extra supply",
+                baseline_units=10,
+                baseline_date="2026-02-01",
+                units_per_session=1,
+            )
+            sak = database.item_by_inventory_type(app.INVENTORY_TYPE_SAK)
+            supply = next(
+                row for row in database.items()
+                if row["item_name"] == "Extra supply"
+            )
+            session_id = database.add_session(
+                "2026-02-02",
+                "Extra Treatment",
+                1,
+                treatment_time="08:00",
+                sak_lot="EXTRA-SAK",
+                sak_hours_remaining=80,
+                sak_timer_started_at="2026-02-02T08:00:00",
+            )
+            database.add_session_item_usage(session_id, supply["id"], 2)
+            session = database.session_by_id(session_id)
+
+            self.assertEqual(3.0, database.item_usage_for_session(supply, session))
+            self.assertEqual(
+                0.5,
+                database.item_session_usage_units(
+                    sak, "2026-02-01", datetime(2026, 2, 2, 8, 1)
+                ),
+            )
+            self.assertEqual(
+                "EXTRA-SAK",
+                database.active_sak_at(datetime(2026, 2, 2, 8, 1))["lot"],
+            )
+        finally:
+            database.conn.close()
+
+    def test_incomplete_treatment_continues_and_closes_sak_timer(self):
+        database = self.make_legacy_database()
+        try:
+            database.init_db()
+            database.add_item(
+                app.GROUP_NX,
+                "SAK",
+                baseline_units=5,
+                baseline_date="2026-02-01",
+                inventory_type=app.INVENTORY_TYPE_SAK,
+            )
+            sak = database.item_by_inventory_type(app.INVENTORY_TYPE_SAK)
+            database.add_session(
+                "2026-02-02",
+                "Regular Treatment",
+                1,
+                treatment_time="08:00",
+                sak_lot="SHARED-SAK",
+                sak_hours_remaining=80,
+                sak_timer_started_at="2026-02-02T08:00:00",
+            )
+            second_id = database.add_session(
+                "2026-02-03",
+                "Incomplete Treatment",
+                0,
+                treatment_time="08:00",
+                sak_lot="SHARED-SAK",
+                sak_hours_remaining=80,
+            )
+
+            self.assertEqual(
+                56,
+                database.session_by_id(second_id)["sak_hours_remaining"],
+            )
+            self.assertEqual(
+                1.0,
+                database.item_session_usage_units(
+                    sak, "2026-02-01", datetime(2026, 2, 3, 8, 1)
+                ),
+            )
+            self.assertIsNone(
+                database.active_sak_at(datetime(2026, 2, 3, 8, 1))
+            )
+        finally:
+            database.conn.close()
+
+    def test_extra_treatment_supports_hanging_bags_and_warmer_line(self):
+        database = self.make_legacy_database()
+        try:
+            database.init_db()
+            database.add_item(
+                app.GROUP_NX,
+                "Hanging Bags",
+                baseline_units=20,
+                baseline_date="2026-02-01",
+                inventory_type=app.INVENTORY_TYPE_HANGING_BAGS,
+            )
+            database.add_item(
+                app.GROUP_NX,
+                "Warmer Lines",
+                baseline_units=10,
+                baseline_date="2026-02-01",
+                inventory_type=app.INVENTORY_TYPE_WARMER_LINES,
+            )
+            session_id = database.add_session(
+                "2026-02-02",
+                "Extra Treatment",
+                1,
+                treatment_time="08:00",
+                warmer_line_lot="EXTRA-WL",
+                hanging_bags_used=6,
+            )
+            session = database.session_by_id(session_id)
+            bags = database.item_by_inventory_type(
+                app.INVENTORY_TYPE_HANGING_BAGS
+            )
+            warmer = database.item_by_inventory_type(
+                app.INVENTORY_TYPE_WARMER_LINES
+            )
+
+            self.assertEqual(6.0, database.item_usage_for_session(bags, session))
+            self.assertEqual(1.0, database.item_usage_for_session(warmer, session))
         finally:
             database.conn.close()
 

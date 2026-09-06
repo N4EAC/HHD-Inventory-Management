@@ -1,7 +1,7 @@
 
 #!/usr/bin/env python3
 """
-HHD Inventory Manager v1.5.8
+HHD Inventory Manager v1.5.9
 
 Changes in v0.1.1:
 - Rename inventory items
@@ -30,7 +30,7 @@ import time
 from tkinter import ttk, messagebox, filedialog
 
 APP_NAME = "HHD Inventory Manager"
-APP_VERSION = "1.5.8"
+APP_VERSION = "1.5.9"
 SAK_MAX_HOURS_REMAINING = 89
 DB_NAME = "hhd_inventory.db"
 SETTINGS_FILE = "hhd_inventory_settings.json"
@@ -60,11 +60,21 @@ def treatment_type_key(session_type):
         return "missed"
     if "incomplete" in value:
         return "incomplete"
+    if "extra" in value:
+        return "extra"
     return "complete"
 
 
 def treatment_uses_inventory(session_type):
     return treatment_type_key(session_type) not in {"missed", "in_center"}
+
+
+def treatment_supports_sak(session_type):
+    return treatment_type_key(session_type) in {"complete", "extra", "incomplete"}
+
+
+def treatment_supports_complete_supplies(session_type):
+    return treatment_type_key(session_type) in {"complete", "extra"}
 
 
 def validate_hanging_bags_used(value):
@@ -314,7 +324,7 @@ def set_theme_palette(theme_name):
     global INPUT_BG, BUTTON_BG, BUTTON_HOVER
     global PANEL_TITLE_BG, STATUS_BG, CHART_BG, SELECT_BG, CALENDAR_EMPTY
     global HEADER_TEXT, SELECTED_TEXT, BLUE_BUTTON_TEXT, BUTTON_DISABLED_TEXT
-    global IN_CENTER_COLOR
+    global IN_CENTER_COLOR, EXTRA_COLOR
 
     theme = THEMES.get(theme_name, THEMES["Medical Blue"])
     BLUE_BG = theme["bg"]
@@ -341,6 +351,7 @@ def set_theme_palette(theme_name):
     BLUE_BUTTON_TEXT = theme.get("blue_button_text", TEXT)
     BUTTON_DISABLED_TEXT = theme.get("button_disabled_text", MUTED)
     IN_CENTER_COLOR = theme.get("in_center", CYAN)
+    EXTRA_COLOR = theme.get("extra", "#B56CFF")
     return theme
 
 set_theme_palette("Medical Blue")
@@ -1105,13 +1116,13 @@ class InventoryDB:
             if active and occurred_at >= active["expires_at"]:
                 active = None
             is_sak_treatment = (
-                str(session["session_type"]).strip() == "Regular Treatment"
+                treatment_supports_sak(session["session_type"])
                 and str(session["sak_lot"] or "").strip()
                 and int(session["hanging_bags_used"] or 0) == 0
             )
             if not is_sak_treatment:
                 uses_alternative = (
-                    str(session["session_type"]).strip() == "Regular Treatment"
+                    treatment_supports_complete_supplies(session["session_type"])
                     and not str(session["sak_lot"] or "").strip()
                     and (
                         int(session["hanging_bags_used"] or 0) > 0
@@ -1186,12 +1197,16 @@ class InventoryDB:
                 raise ValueError(f"{label} must be 80 characters or fewer.")
 
         hanging_bags_used = validate_hanging_bags_used(hanging_bags_used)
-        if str(session_type).strip() != "Regular Treatment":
+        full_supply_treatment = treatment_supports_complete_supplies(session_type)
+        sak_treatment = treatment_supports_sak(session_type)
+        stored_sak_hours = 0
+        stored_sak_timer_started_at = ""
+        if not full_supply_treatment:
             hanging_bags_used = 0
         else:
             if hanging_bags_used > 0 and values["sak_lot"]:
                 raise ValueError(
-                    "Hanging bags replace the SAK. A Complete Treatment "
+                    "Hanging bags replace the SAK. This treatment "
                     "cannot contain both a SAK lot and hanging bags."
                 )
             if hanging_bags_used > 0 and not values["warmer_line_lot"]:
@@ -1217,9 +1232,10 @@ class InventoryDB:
                         f"No active inventory item is classified as {label}."
                     )
 
-            stored_sak_hours = 0
-            stored_sak_timer_started_at = ""
-            if values["sak_lot"] and treatment_time:
+        if sak_treatment and values["sak_lot"]:
+            if not self.item_by_inventory_type(INVENTORY_TYPE_SAK):
+                raise ValueError("No active inventory item is classified as SAK.")
+            if treatment_time:
                 used_at = datetime.strptime(
                     f"{session_date} {treatment_time}",
                     "%Y-%m-%d %H:%M",
@@ -1266,8 +1282,8 @@ class InventoryDB:
                 notes,
                 values["pak_lot"],
                 values["sak_lot"],
-                stored_sak_hours if str(session_type).strip() == "Regular Treatment" else 0,
-                stored_sak_timer_started_at if str(session_type).strip() == "Regular Treatment" else "",
+                stored_sak_hours if sak_treatment else 0,
+                stored_sak_timer_started_at if sak_treatment else "",
                 values["cartridge_lot"],
                 values["warmer_line_lot"],
                 hanging_bags_used,
@@ -1331,6 +1347,12 @@ class InventoryDB:
         )
 
         if treatment_key == "incomplete":
+            if (
+                item["inventory_type"] == INVENTORY_TYPE_SAK
+                and str(session["sak_lot"] or "").strip()
+            ):
+                # The SAK lifecycle accounts for the half-unit and expiry.
+                return 0.0
             if explicit_usage > 0:
                 return explicit_usage
 
@@ -1354,11 +1376,11 @@ class InventoryDB:
 
         if (
             item["inventory_type"] == INVENTORY_TYPE_HANGING_BAGS
-            and str(session["session_type"]).strip() == "Regular Treatment"
+            and treatment_supports_complete_supplies(session["session_type"])
         ):
             return float(session["hanging_bags_used"] or 0) + explicit_usage
 
-        if str(session["session_type"]).strip() == "Regular Treatment":
+        if treatment_supports_complete_supplies(session["session_type"]):
             if item["inventory_type"] == INVENTORY_TYPE_WARMER_LINES:
                 automatic = (
                     1.0
@@ -1439,14 +1461,21 @@ class InventoryDB:
                 continue
 
             treatment_key = treatment_type_key(session["session_type"])
-            if treatment_key == "incomplete":
+            incomplete_with_sak = (
+                treatment_key == "incomplete"
+                and str(session["sak_lot"] or "").strip()
+            )
+            if treatment_key == "incomplete" and not incomplete_with_sak:
                 total += self.item_usage_for_session(item, session)
                 continue
             if treatment_key not in {"missed", "in_center"}:
-                total += self.explicit_item_usage_for_session(
-                    item["id"],
-                    session["id"],
-                )
+                # A listed SAK on an incomplete treatment describes the same
+                # half-unit handled by the lifecycle, not an extra deduction.
+                if not incomplete_with_sak:
+                    total += self.explicit_item_usage_for_session(
+                        item["id"],
+                        session["id"],
+                    )
 
             if (
                 remaining > 0
@@ -1458,13 +1487,13 @@ class InventoryDB:
                 active_lot = ""
 
             is_sak_treatment = (
-                str(session["session_type"]).strip() == "Regular Treatment"
+                treatment_supports_sak(session["session_type"])
                 and str(session["sak_lot"] or "").strip()
                 and int(session["hanging_bags_used"] or 0) == 0
             )
             if not is_sak_treatment:
                 uses_alternative = (
-                    str(session["session_type"]).strip() == "Regular Treatment"
+                    treatment_supports_complete_supplies(session["session_type"])
                     and not str(session["sak_lot"] or "").strip()
                     and (
                         int(session["hanging_bags_used"] or 0) > 0
@@ -4511,6 +4540,7 @@ class HHDApp(tk.Tk):
 
         colors = {
             "complete": GREEN,
+            "extra": EXTRA_COLOR,
             "incomplete": YELLOW,
             "missed": RED,
             "in_center": IN_CENTER_COLOR,
@@ -4862,6 +4892,7 @@ class HHDApp(tk.Tk):
                 "missed": "Missed",
                 "incomplete": "Incomplete",
                 "in_center": "In Center",
+                "extra": "Extra",
                 "complete": "Completed",
             }[treatment_type_key(raw)]
 
@@ -5091,7 +5122,7 @@ class HHDApp(tk.Tk):
         tk.Label(controls,textvariable=title_var,bg=BLUE_PANEL,fg=TEXT,font=("Segoe UI",14,"bold")).pack(side="left",expand=True)
         legend=tk.Frame(self.content,bg=BLUE_BG); legend.pack(fill="x",padx=18,pady=(0,8))
         tk.Label(legend,text="Legend:",bg=BLUE_BG,fg=TEXT,font=("Segoe UI",10,"bold")).pack(side="left",padx=(0,10))
-        for label,color in [("Complete",GREEN),("Incomplete",YELLOW),("Missed",RED),("In Center",IN_CENTER_COLOR)]:
+        for label,color in [("Complete",GREEN),("Extra",EXTRA_COLOR),("Incomplete",YELLOW),("Missed",RED),("In Center",IN_CENTER_COLOR)]:
             tk.Label(legend,text=f"  {label}  ",bg=color,fg="#111111",font=("Segoe UI",10,"bold"),padx=8,pady=4).pack(side="left",padx=(0,10))
         calendar_panel,calendar_body=self.make_panel(self.content,"Calendar")
         calendar_panel.pack(fill="both",expand=True,padx=16,pady=(0,14))
@@ -5107,8 +5138,8 @@ class HHDApp(tk.Tk):
             fg=TEXT if current_month else MUTED
             tk.Label(cell,text=str(day_value.day),bg=CALENDAR_EMPTY,fg=fg,font=("Segoe UI",12,"bold"),anchor="nw").pack(fill="x",padx=6,pady=(5,2))
             bands=tk.Frame(cell,bg=CALENDAR_EMPTY); bands.pack(fill="both",expand=True,padx=3,pady=(0,3))
-            colors={"complete":GREEN,"incomplete":YELLOW,"missed":RED,"in_center":IN_CENTER_COLOR}
-            names={"complete":"Complete","incomplete":"Incomplete","missed":"Missed","in_center":"In Center"}
+            colors={"complete":GREEN,"extra":EXTRA_COLOR,"incomplete":YELLOW,"missed":RED,"in_center":IN_CENTER_COLOR}
+            names={"complete":"Complete","extra":"Extra","incomplete":"Incomplete","missed":"Missed","in_center":"In Center"}
             for tr in treatments:
                 band=tk.Frame(bands,bg=colors[tr["status"]])
                 band.pack(fill="both",expand=True,pady=1)
@@ -5192,6 +5223,7 @@ class HHDApp(tk.Tk):
                             "missed": "Missed",
                             "incomplete": "Incomplete",
                             "in_center": "In Center",
+                            "extra": "Extra",
                             "complete": "Completed",
                         }[treatment_type_key(record["session_type"])]
                         writer.writerow([
@@ -6132,33 +6164,36 @@ class HHDApp(tk.Tk):
             missed = treatment_type == "Missed Treatment"
             in_center = treatment_type == "In Center Treatment"
             complete = treatment_type == "Complete Treatment"
+            extra = treatment_type == "Extra Treatment"
+            full_supply_treatment = complete or extra
+            sak_treatment = full_supply_treatment or incomplete
 
             equiv_var.set(
                 "0" if incomplete or missed or in_center else "1"
             )
 
-            if incomplete or complete:
+            if incomplete or full_supply_treatment:
                 custom_frame.grid()
             else:
                 custom_frame.grid_remove()
             usage_panel_title.set(
                 "Incomplete Treatment — Actual Items Used"
                 if incomplete
-                else "Complete Treatment — Additional Items Used (Optional)"
+                else f"{treatment_type} — Additional Items Used (Optional)"
             )
             scroll_body.after_idle(update_treatment_scroll_region)
 
             item_combo.configure(
-                state="readonly" if incomplete or complete else "disabled"
+                state="readonly" if incomplete or full_supply_treatment else "disabled"
             )
             units_combo.configure(
-                state="readonly" if incomplete or complete else "disabled"
+                state="readonly" if incomplete or full_supply_treatment else "disabled"
             )
             add_usage_button.configure(
-                state="normal" if incomplete or complete else "disabled"
+                state="normal" if incomplete or full_supply_treatment else "disabled"
             )
             remove_usage_button.configure(
-                state="normal" if incomplete or complete else "disabled"
+                state="normal" if incomplete or full_supply_treatment else "disabled"
             )
 
             for entry in identity_entries:
@@ -6166,13 +6201,13 @@ class HHDApp(tk.Tk):
                     state="disabled" if missed or in_center else "normal"
                 )
             warmer_line_entry.configure(
-                state="normal" if complete else "disabled"
+                state="normal" if full_supply_treatment else "disabled"
             )
             hanging_bags_combo.configure(
-                state="readonly" if complete else "disabled"
+                state="readonly" if full_supply_treatment else "disabled"
             )
             using_hanging_bags = (
-                complete
+                full_supply_treatment
                 and validate_hanging_bags_used(hanging_bags_var.get()) > 0
             )
             if using_hanging_bags:
@@ -6180,7 +6215,7 @@ class HHDApp(tk.Tk):
                     identity_vars["sak_lot"].set("")
                 sak_entry.configure(state="disabled")
             using_sak = (
-                complete
+                sak_treatment
                 and bool(identity_vars["sak_lot"].get().strip())
                 and not using_hanging_bags
             )
@@ -6228,15 +6263,20 @@ class HHDApp(tk.Tk):
                     else session_type
                 )
                 equivalent = float(equiv_var.get())
+                full_supply_treatment = session_type in {
+                    "Complete Treatment",
+                    "Extra Treatment",
+                }
+                sak_treatment = full_supply_treatment or session_type == "Incomplete Treatment"
                 hanging_bags_used = validate_hanging_bags_used(
                     hanging_bags_var.get()
-                ) if session_type == "Complete Treatment" else 0
+                ) if full_supply_treatment else 0
 
                 sak_lot = identity_vars["sak_lot"].get().strip()
                 warmer_line_lot = identity_vars[
                     "warmer_line_lot"
                 ].get().strip()
-                if session_type == "Complete Treatment":
+                if full_supply_treatment:
                     if hanging_bags_used > 0 and sak_lot:
                         raise ValueError(
                             "Hanging bags replace the SAK. Enter either a SAK "
@@ -6303,7 +6343,7 @@ class HHDApp(tk.Tk):
                     ),
                     sak_hours_remaining=(
                         identity_vars["sak_hours_remaining"].get()
-                        if session_type == "Complete Treatment" and sak_lot
+                        if sak_treatment and sak_lot
                         else 80
                     ),
                     sak_timer_started_at=datetime.now().isoformat(
@@ -6315,7 +6355,7 @@ class HHDApp(tk.Tk):
                     ),
                     warmer_line_lot=(
                         warmer_line_lot
-                        if session_type == "Complete Treatment" else ""
+                        if full_supply_treatment else ""
                     ),
                     hanging_bags_used=hanging_bags_used,
                     cycler_serial=(
@@ -6331,6 +6371,7 @@ class HHDApp(tk.Tk):
                 if session_type in {
                     "Incomplete Treatment",
                     "Complete Treatment",
+                    "Extra Treatment",
                 }:
                     for item_id, _label, units in pending:
                         self.db.add_session_item_usage(

@@ -5,19 +5,34 @@
 
 HHD Inventory Manager was created to help home hemodialysis patients and caregivers organize treatment supplies, record treatment activity, and maintain a clear history of inventory and treatment information.
 
-Release packages are available for Windows and Apple-silicon Macs, with Ubuntu
-24.04 planned next. All platforms use the same SQLite database format so
+Release packages are available for Windows, Apple-silicon Macs, and Linux.
+All platforms use the same SQLite database format so
 databases can be exported and imported between systems.
 
-**[Download HHD Inventory Manager v1.5.8](https://github.com/N4EAC/HHD-Inventory-Management/releases/tag/v1.5.8)**
+**[Download HHD Inventory Manager v1.5.9](https://github.com/N4EAC/HHD-Inventory-Management/releases/tag/v1.5.9)**
 
-- Windows 10/11: `HHD_Inventory_Manager_Setup_v1.5.8.1.exe`
-- Apple-silicon macOS: `HHD_Inventory_Manager_macOS_arm64_v1.5.8.dmg`
+- Windows 10/11: `HHD_Inventory_Manager_Setup_v1.5.9.1.exe`
+- Apple-silicon macOS: `HHD_Inventory_Manager_macOS_arm64_v1.5.9.dmg`
+- Ubuntu/Debian AMD64: `hhd-inventory-manager_1.5.9_amd64.deb`
+- Portable Linux x86-64: `hhd-inventory-manager-1.5.9-x86_64.tar.gz`
 
 The current macOS package is not Apple-notarized. macOS may require the user to
 approve the application in Privacy & Security before its first launch.
 
 <img width="1584" height="988" alt="image" src="https://github.com/user-attachments/assets/3e618332-5457-4214-80de-8d2de28d12d1" />
+
+## New in version 1.5.9
+
+- Extra treatments are tracked as their own treatment type and provide the
+  same SAK, hanging-bag, Warmer Line, lot/equipment, and optional additional
+  item controls as Complete treatments.
+- Incomplete treatments retain their actual-items-used workflow and can now
+  participate in the SAK timer when a SAK lot number is entered.
+- Calendar, treatment details, lot search, and CSV exports identify Extra
+  treatments as **Extra** with a distinct color instead of Completed.
+- Windows build output is isolated from macOS and Linux artifacts so building
+  one platform no longer deletes packages produced for another platform.
+- Existing databases remain compatible and require no manual migration.
 
 ## New in version 1.5.8
 

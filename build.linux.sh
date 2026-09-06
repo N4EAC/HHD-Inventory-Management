@@ -5,7 +5,7 @@ set -Eeuo pipefail
 # support because PyInstaller bundles native libraries from the build host.
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 cd "$ROOT"
-APP_VERSION="1.5.8"
+APP_VERSION="1.5.9"
 PKG="hhd-inventory-manager"
 # Keep the executable basename identical to the freedesktop desktop-file ID.
 # GNOME uses this as a fallback when matching a running window to its launcher.

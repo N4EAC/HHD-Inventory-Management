@@ -1,7 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-set "APP_VERSION=1.5.8"
+set "APP_VERSION=1.5.9"
 
 echo Building HHD Inventory Manager v%APP_VERSION%
 echo.
@@ -48,14 +48,17 @@ if errorlevel 1 (
     exit /b 1
 )
 
-if exist build rmdir /s /q build
-if exist dist rmdir /s /q dist
+if exist build\windows rmdir /s /q build\windows
+if exist dist\windows rmdir /s /q dist\windows
 
 python -m PyInstaller ^
   --noconfirm ^
   --clean ^
   --windowed ^
   --name "HHD_Inventory_Manager" ^
+  --specpath build\windows ^
+  --workpath build\windows\pyinstaller ^
+  --distpath dist\windows ^
   --icon=hhd_inventory_manager.ico ^
   --add-data "hhd_inventory_manager.ico;." ^
   --add-data "hhd_inventory_manager.png;." ^
@@ -72,5 +75,5 @@ if errorlevel 1 (
 
 echo.
 echo HHD Inventory Manager v%APP_VERSION% build complete.
-echo EXE folder: dist\HHD_Inventory_Manager
+echo EXE folder: dist\windows\HHD_Inventory_Manager
 pause
