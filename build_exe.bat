@@ -1,6 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
+set "PROJECT_ROOT=%CD%"
 set "APP_VERSION=1.5.9"
 
 echo Building HHD Inventory Manager v%APP_VERSION%
@@ -11,6 +12,20 @@ if errorlevel 1 (
     echo Python was not found. Please install Python 3.11 or newer.
     pause
     exit /b 1
+)
+
+for %%F in (
+    hhd_inventory_manager.py
+    hhd_inventory_manager.ico
+    hhd_inventory_manager.png
+    hhd_inventory_manager_about.png
+    hhd_menu_icon.png
+) do (
+    if not exist "%PROJECT_ROOT%\%%F" (
+        echo Required build file is missing: %%F
+        pause
+        exit /b 1
+    )
 )
 
 python -m pip show pyinstaller >nul 2>nul
@@ -59,12 +74,12 @@ python -m PyInstaller ^
   --specpath build\windows ^
   --workpath build\windows\pyinstaller ^
   --distpath dist\windows ^
-  --icon=hhd_inventory_manager.ico ^
-  --add-data "hhd_inventory_manager.ico;." ^
-  --add-data "hhd_inventory_manager.png;." ^
-  --add-data "hhd_inventory_manager_about.png;." ^
-  --add-data "hhd_menu_icon.png;." ^
-  hhd_inventory_manager.py
+  --icon="%PROJECT_ROOT%\hhd_inventory_manager.ico" ^
+  --add-data "%PROJECT_ROOT%\hhd_inventory_manager.ico;." ^
+  --add-data "%PROJECT_ROOT%\hhd_inventory_manager.png;." ^
+  --add-data "%PROJECT_ROOT%\hhd_inventory_manager_about.png;." ^
+  --add-data "%PROJECT_ROOT%\hhd_menu_icon.png;." ^
+  "%PROJECT_ROOT%\hhd_inventory_manager.py"
 
 if errorlevel 1 (
     echo.
